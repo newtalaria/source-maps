@@ -1,0 +1,24 @@
+{
+  "name": "source-maps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Action that uploads built JavaScript source maps to Talaria",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js --legal-comments=none",
+    "test": "esbuild test/*.test.ts --bundle --platform=node --target=node20 --format=cjs --outdir=test/dist && node --test test/dist/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@newtalaria/cli": "0.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

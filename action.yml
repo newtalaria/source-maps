@@ -1,0 +1,27 @@
+name: Talaria source maps
+description: Upload built JavaScript source maps to Talaria for a release
+author: Talaria
+branding:
+  icon: upload-cloud
+  color: blue
+inputs:
+  path:
+    description: Directory of built *.js.map files, relative to the workspace
+    required: true
+  url:
+    description: >-
+      Talaria API base URL. Defaults to https://ingest.newtalaria.com.
+      TALARIA_BASE_URL is used when this input is omitted.
+    required: false
+  release:
+    description: >-
+      Release string sent with each map. Defaults to TALARIA_RELEASE, then
+      NEXT_PUBLIC_TALARIA_RELEASE, then GITHUB_REF_NAME@ the first 7 characters
+      of GITHUB_SHA.
+    required: false
+outputs:
+  release:
+    description: Release string used for the upload
+runs:
+  using: node24
+  main: dist/index.js
