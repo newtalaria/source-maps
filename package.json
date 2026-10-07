@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@actions/core": "^1.11.1",
-    "@newtalaria/cli": "0.5.4"
+    "@newtalaria/cli": "^0.5.6"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

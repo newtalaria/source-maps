@@ -51,6 +51,7 @@ To share that string with the app build, set it before both steps:
 | `path` | yes | Directory of built `*.js.map` files, relative to the workspace. |
 | `url` | no | `https://ingest.newtalaria.com`, or `TALARIA_BASE_URL` when that variable is set and `url` is omitted. |
 | `release` | no | `TALARIA_RELEASE`, then `NEXT_PUBLIC_TALARIA_RELEASE`, then `GITHUB_REF_NAME` @ the first 7 characters of `GITHUB_SHA`. |
+| `silverstripe-combine-files` | no | `true` when the uploaded script is the first file in `Requirements::combine_files`. The map's generated lines shift by Silverstripe's one-line header. Deploy the rewritten `.js` as that first file. |
 
 `http://localhost` and `http://127.0.0.1` are accepted for a local API. Any other URL must be `https`.
 

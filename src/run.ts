@@ -43,9 +43,22 @@ export async function run(io: ActionIo): Promise<void> {
     const env: NodeJS.ProcessEnv = { ...io.env, TALARIA_RELEASE_KEY: key };
     delete env.TALARIA_API_KEY;
 
+    const argv = [
+      'sourcemaps',
+      'upload',
+      directory,
+      '--release',
+      release,
+      '--url',
+      url,
+    ];
+    if (io.getInput('silverstripe-combine-files').trim().toLowerCase() === 'true') {
+      argv.push('--silverstripe-combine-files');
+    }
+
     const code = await upload({
       cwd: io.workspace,
-      argv: ['sourcemaps', 'upload', directory, '--release', release, '--url', url],
+      argv,
       env,
       log: info,
       error,

@@ -11640,12 +11640,12 @@ var require_headers = __commonJS({
       append(name, value) {
         this[kHeadersSortedMap] = null;
         const lowercaseName = name.toLowerCase();
-        const exists = this[kHeadersMap].get(lowercaseName);
-        if (exists) {
+        const exists2 = this[kHeadersMap].get(lowercaseName);
+        if (exists2) {
           const delimiter = lowercaseName === "cookie" ? "; " : ", ";
           this[kHeadersMap].set(lowercaseName, {
-            name: exists.name,
-            value: `${exists.value}${delimiter}${value}`
+            name: exists2.name,
+            value: `${exists2.value}${delimiter}${value}`
           });
         } else {
           this[kHeadersMap].set(lowercaseName, { name, value });
@@ -18140,7 +18140,7 @@ var require_summary = __commonJS({
     exports2.summary = exports2.markdownSummary = exports2.SUMMARY_DOCS_URL = exports2.SUMMARY_ENV_VAR = void 0;
     var os_1 = require("os");
     var fs_1 = require("fs");
-    var { access, appendFile, writeFile } = fs_1.promises;
+    var { access: access2, appendFile, writeFile: writeFile2 } = fs_1.promises;
     exports2.SUMMARY_ENV_VAR = "GITHUB_STEP_SUMMARY";
     exports2.SUMMARY_DOCS_URL = "https://docs.github.com/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary";
     var Summary = class {
@@ -18163,7 +18163,7 @@ var require_summary = __commonJS({
             throw new Error(`Unable to find environment variable for $${exports2.SUMMARY_ENV_VAR}. Check if your runtime environment supports job summaries.`);
           }
           try {
-            yield access(pathFromEnv, fs_1.constants.R_OK | fs_1.constants.W_OK);
+            yield access2(pathFromEnv, fs_1.constants.R_OK | fs_1.constants.W_OK);
           } catch (_a) {
             throw new Error(`Unable to access summary file: '${pathFromEnv}'. Check if the file has correct read/write permissions.`);
           }
@@ -18198,7 +18198,7 @@ var require_summary = __commonJS({
         return __awaiter(this, void 0, void 0, function* () {
           const overwrite = !!(options === null || options === void 0 ? void 0 : options.overwrite);
           const filePath = yield this.filePath();
-          const writeFunc = overwrite ? writeFile : appendFile;
+          const writeFunc = overwrite ? writeFile2 : appendFile;
           yield writeFunc(filePath, this._buffer, { encoding: "utf8" });
           return this.emptyBuffer();
         });
@@ -18511,7 +18511,7 @@ var require_io_util = __commonJS({
     exports2.IS_WINDOWS = process.platform === "win32";
     exports2.UV_FS_O_EXLOCK = 268435456;
     exports2.READONLY = fs.constants.O_RDONLY;
-    function exists(fsPath) {
+    function exists2(fsPath) {
       return __awaiter(this, void 0, void 0, function* () {
         try {
           yield exports2.stat(fsPath);
@@ -18524,7 +18524,7 @@ var require_io_util = __commonJS({
         return true;
       });
     }
-    exports2.exists = exists;
+    exports2.exists = exists2;
     function isDirectory(fsPath, useStat = false) {
       return __awaiter(this, void 0, void 0, function* () {
         const stats = useStat ? yield exports2.stat(fsPath) : yield exports2.lstat(fsPath);
@@ -19901,6 +19901,7 @@ function resolveActionRelease(input) {
 var import_promises2 = require("node:fs/promises");
 
 // node_modules/@newtalaria/cli/dist/upload.js
+var import_node_crypto = require("node:crypto");
 var import_promises = require("node:fs/promises");
 var import_node_path2 = __toESM(require("node:path"), 1);
 var import_node_zlib = require("node:zlib");
@@ -20078,8 +20079,52 @@ var ServerpodTransport = class {
   }
 };
 
+// node_modules/@newtalaria/core/dist/release.js
+function resolveReleaseIdentity2(input) {
+  const env = input.env ?? {};
+  const explicitRelease = nonEmpty2(input.release) ?? nonEmpty2(env.TALARIA_RELEASE) ?? nonEmpty2(env.NEXT_PUBLIC_TALARIA_RELEASE);
+  const explicitSha = nonEmpty2(input.commitSha) ?? nonEmpty2(env.TALARIA_COMMIT_SHA) ?? nonEmpty2(env.NEXT_PUBLIC_TALARIA_COMMIT_SHA);
+  const ci = fromCi2(env);
+  if (explicitRelease || explicitSha) {
+    return {
+      release: explicitRelease,
+      commitSha: explicitSha,
+      releaseRefKind: explicitRelease && ci.release && explicitRelease === ci.release ? ci.releaseRefKind : void 0
+    };
+  }
+  return ci;
+}
+function fromCi2(env) {
+  const githubRef = nonEmpty2(env.GITHUB_REF_NAME);
+  const githubSha = nonEmpty2(env.GITHUB_SHA);
+  if (githubRef && githubSha && githubSha.length >= 7) {
+    const type = nonEmpty2(env.GITHUB_REF_TYPE);
+    return {
+      release: `${githubRef}@${githubSha.slice(0, 7)}`,
+      commitSha: githubSha,
+      releaseRefKind: type === "tag" || type === "branch" ? type : void 0
+    };
+  }
+  const gitlabRef = nonEmpty2(env.CI_COMMIT_REF_NAME);
+  const gitlabSha = nonEmpty2(env.CI_COMMIT_SHA);
+  if (gitlabRef && gitlabSha && gitlabSha.length >= 7) {
+    return {
+      release: `${gitlabRef}@${gitlabSha.slice(0, 7)}`,
+      commitSha: gitlabSha,
+      releaseRefKind: nonEmpty2(env.CI_COMMIT_TAG) ? "tag" : "branch"
+    };
+  }
+  return {};
+}
+function nonEmpty2(value) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : void 0;
+}
+
 // node_modules/@newtalaria/cli/dist/upload.js
-var FILE_NAME = /^[A-Za-z0-9._~+-]+$/;
+var SEGMENT = /^[A-Za-z0-9._~+-]+$/;
+var SAFE_DEBUG_ID = /^[A-Za-z0-9._~+-]{1,80}$/;
+var DEBUG_COMMENT = /\/\/# debugId=([^\s]+)/;
 var LOCAL_URL = "http://localhost:8080";
 async function uploadSourceMaps(options) {
   const log = options.log ?? ((line) => console.log(line));
@@ -20092,7 +20137,10 @@ async function uploadSourceMaps(options) {
     return 1;
   }
   const url = parsed.url || options.env.TALARIA_BASE_URL || LOCAL_URL;
-  const release = parsed.release || options.env.TALARIA_RELEASE || "local";
+  const release = resolveReleaseIdentity2({
+    release: parsed.release,
+    env: options.env
+  }).release || "local";
   const apiKey = parsed.apiKey || options.env.TALARIA_RELEASE_KEY || options.env.TALARIA_API_KEY;
   if (!apiKey) {
     error2("Set TALARIA_RELEASE_KEY to a releases:write key, or pass --api-key.");
@@ -20105,18 +20153,23 @@ async function uploadSourceMaps(options) {
     return 1;
   }
   log(`${url} release ${release}`);
+  if (parsed.silverstripeCombineFiles) {
+    log("Silverstripe combine: shifted generated lines by the header comment");
+  }
   const transport = new ServerpodTransport({ baseUrl: url, apiKey });
   let failed = 0;
   for (const file of maps) {
-    const fileName = import_node_path2.default.basename(file).replace(/\.map$/, "");
+    const prepared = await prepareArtifact(root, file);
+    const payload = parsed.silverstripeCombineFiles ? shiftForSilverstripeCombine(prepared.json) : prepared.json;
+    const fileName = prepared.fileName;
     log(fileName);
-    if (!FILE_NAME.test(fileName) || fileName.length > 200) {
-      error2(`${fileName}: file name must be the minified basename, such as main.js`);
+    if (!fileNameOk(fileName)) {
+      error2(`${fileName}: file name must be a served artifact path, such as static/js/main.js`);
       failed += 1;
       continue;
     }
-    const raw = await (0, import_promises.readFile)(file);
-    const debugId = readDebugId(raw);
+    const raw = Buffer.from(payload, "utf8");
+    const debugId = prepared.debugId;
     const gzipBytes = `decode('${(0, import_node_zlib.gzipSync)(raw).toString("base64")}', 'base64')`;
     const input = {
       __className__: "UploadSourceMapInput",
@@ -20148,6 +20201,7 @@ function parseArgs(argv) {
   let release;
   let url;
   let apiKey;
+  let silverstripeCombineFiles = false;
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? "";
@@ -20157,6 +20211,8 @@ function parseArgs(argv) {
       url = requireValue(args, ++i, "--url");
     } else if (arg === "--api-key") {
       apiKey = requireValue(args, ++i, "--api-key");
+    } else if (arg === "--silverstripe-combine-files") {
+      silverstripeCombineFiles = true;
     } else if (arg.startsWith("--")) {
       throw new Error(`Unknown flag ${arg}`);
     } else {
@@ -20166,7 +20222,24 @@ function parseArgs(argv) {
   if (positionals.length > 1) {
     throw new Error("Pass one directory of built source maps");
   }
-  return { path: positionals[0] ?? ".", release, url, apiKey };
+  return {
+    path: positionals[0] ?? ".",
+    release,
+    url,
+    apiKey,
+    silverstripeCombineFiles
+  };
+}
+function shiftForSilverstripeCombine(jsonText) {
+  const parsed = parseMap(jsonText);
+  if (!parsed)
+    return jsonText;
+  const mappings = parsed.mappings;
+  if (typeof mappings !== "string" || mappings.length === 0)
+    return jsonText;
+  parsed.mappings = `;${mappings}`;
+  return `${JSON.stringify(parsed)}
+`;
 }
 function requireValue(args, index, flag) {
   const value = args[index];
@@ -20199,19 +20272,83 @@ async function walk(dir, out) {
     }
   }
 }
-function readDebugId(raw) {
+function fileNameOk(name) {
+  if (!name || name.length > 200 || name.includes("\\"))
+    return false;
+  const parts = name.split("/");
+  return parts.length > 0 && parts.every((part) => part !== "." && part !== ".." && SEGMENT.test(part));
+}
+async function prepareArtifact(root, mapPath) {
+  const jsonText = await (0, import_promises.readFile)(mapPath, "utf8");
+  const parsed = parseMap(jsonText);
+  const jsPath = mapPath.slice(0, -".map".length);
+  const sibling = jsPath.endsWith(".js") && jsPath !== mapPath && await exists(jsPath);
+  if (!sibling || !parsed) {
+    return {
+      fileName: import_node_path2.default.basename(mapPath).replace(/\.map$/, ""),
+      debugId: debugIdOf(parsed),
+      json: jsonText
+    };
+  }
+  let js = await (0, import_promises.readFile)(jsPath, "utf8");
+  const fromJs = safeDebugId(js.match(DEBUG_COMMENT)?.[1]);
+  const fromMap = safeDebugId(debugIdOf(parsed));
+  const debugId = fromJs || fromMap || (0, import_node_crypto.randomUUID)();
+  if (!fromJs) {
+    const body = js.endsWith("\n") ? js : `${js}
+`;
+    js = `${body}${debugIdSnippet(debugId)}
+`;
+    await (0, import_promises.writeFile)(jsPath, js);
+  }
+  let json = jsonText;
+  if (fromMap !== debugId) {
+    parsed.debugId = debugId;
+    json = `${JSON.stringify(parsed)}
+`;
+    await (0, import_promises.writeFile)(mapPath, json);
+  }
+  return {
+    fileName: import_node_path2.default.relative(root, jsPath).split(import_node_path2.default.sep).join("/"),
+    debugId,
+    json
+  };
+}
+function debugIdSnippet(debugId) {
+  return `;try{(function(id){var g=globalThis.__talariaDebugIds||(globalThis.__talariaDebugIds={});function put(url){if(!url)return;g[url]=id;var clean=String(url).split("?")[0].split("#")[0].replace(/:\\d+:\\d+$/,"");g[clean]=id;}try{if(typeof document!=="undefined"&&document.currentScript&&document.currentScript.src)put(document.currentScript.src);}catch(e){}try{var stack=(new Error).stack||"";var matches=stack.match(/https?:\\/\\/[^)\\s]+/g)||[];for(var i=0;i<matches.length;i++)put(matches[i]);}catch(e){}})("${debugId}")}catch(e){}
+//# debugId=${debugId}`;
+}
+function parseMap(jsonText) {
   try {
-    const parsed = JSON.parse(raw.toString("utf8"));
+    const parsed = JSON.parse(jsonText);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return void 0;
     }
-    const debugId = parsed.debugId;
-    if (typeof debugId !== "string")
-      return void 0;
-    const trimmed = debugId.trim();
-    return trimmed.length > 0 ? trimmed : void 0;
+    return parsed;
   } catch {
     return void 0;
+  }
+}
+function safeDebugId(value) {
+  if (!value || !SAFE_DEBUG_ID.test(value))
+    return void 0;
+  return value;
+}
+function debugIdOf(parsed) {
+  if (!parsed)
+    return void 0;
+  const value = parsed.debugId ?? parsed.debug_id;
+  if (typeof value !== "string")
+    return void 0;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : void 0;
+}
+async function exists(file) {
+  try {
+    await (0, import_promises.access)(file);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -20240,9 +20377,21 @@ async function run(io) {
     io.setOutput("release", release);
     const env = { ...io.env, TALARIA_RELEASE_KEY: key };
     delete env.TALARIA_API_KEY;
+    const argv = [
+      "sourcemaps",
+      "upload",
+      directory,
+      "--release",
+      release,
+      "--url",
+      url
+    ];
+    if (io.getInput("silverstripe-combine-files").trim().toLowerCase() === "true") {
+      argv.push("--silverstripe-combine-files");
+    }
     const code = await upload({
       cwd: io.workspace,
-      argv: ["sourcemaps", "upload", directory, "--release", release, "--url", url],
+      argv,
       env,
       log: info2,
       error: error2

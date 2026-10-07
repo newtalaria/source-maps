@@ -261,6 +261,17 @@ describe('upload action', () => {
     assert.deepEqual(logged.failed, ['Source map upload failed']);
   });
 
+  it('passes Silverstripe combine mode through to the CLI', async () => {
+    const root = await workspace();
+    const { io, failed, uploads } = harness({
+      root,
+      inputs: { path: 'source-maps', 'silverstripe-combine-files': 'true' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    assert.equal(uploads[0]!.argv.at(-1), '--silverstripe-combine-files');
+  });
+
   it('fails the step when the CLI exits non-zero', async () => {
     const root = await workspace();
     const { io, failed, outputs } = harness({

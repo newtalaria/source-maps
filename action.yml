@@ -19,6 +19,13 @@ inputs:
       NEXT_PUBLIC_TALARIA_RELEASE, then GITHUB_REF_NAME@ the first 7 characters
       of GITHUB_SHA.
     required: false
+  silverstripe-combine-files:
+    description: >-
+      Shift each uploaded map by the one-line header Silverstripe writes
+      before the first file in Requirements::combine_files. The rewritten
+      .js must be that first file.
+    required: false
+    default: 'false'
 outputs:
   release:
     description: Release string used for the upload
