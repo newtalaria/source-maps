@@ -3,10 +3,10 @@ import { resolveReleaseIdentity } from './release.js';
 
 export const DEFAULT_API_URL = 'https://ingest.newtalaria.com';
 
-const KEY_IN_TEXT = /tal_live_[A-Za-z0-9_-]+/g;
+const KEY_IN_TEXT = /tal_(prod|stg|test|dev)_[A-Za-z0-9_-]+/g;
 
 export function scrubSecrets(line: string): string {
-  return line.replace(KEY_IN_TEXT, 'tal_live_[redacted]');
+  return line.replace(KEY_IN_TEXT, 'tal_***_[redacted]');
 }
 
 export function resolveApiUrl(inputUrl: string, envUrl: string | undefined): string {
@@ -21,7 +21,7 @@ export function assertSafeUrl(url: string): void {
   } catch {
     throw new Error('API URL is not a valid URL');
   }
-  if (parsed.username || parsed.password || /tal_live_/i.test(url)) {
+  if (parsed.username || parsed.password || /tal_(prod|stg|test|dev)_/i.test(url)) {
     throw new Error('API URL must not include credentials');
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();

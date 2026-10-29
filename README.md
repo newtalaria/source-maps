@@ -1,31 +1,50 @@
-# Talaria source maps
+# Talaria release
 
-Uploads a directory of already-built JavaScript source maps so Talaria can show original frames for that release.
+Creates a Talaria release with commits and source maps for GitHub Actions workflows.
 
-Run this after the step that emits `*.js.map` files. The action does not build the app. It calls `@newtalaria/cli` (`talaria sourcemaps upload`), which posts each map to `POST /sourceMaps/upload`.
+This action handles release creation, commit association, and source map uploads per the Talaria Integration Standard (TIS v0.2). It wraps `@newtalaria/cli` commands for `sourcemaps upload` and `releases create`.
 
-The release string matches the one the app sends. On GitHub Actions that string is `GITHUB_REF_NAME` plus `@` plus the first 7 characters of `GITHUB_SHA`, unless you set `release` or `TALARIA_RELEASE`. The same value is the `release` output.
+The release string matches the one your app sends at runtime. On GitHub Actions, that string is `GITHUB_REF_NAME` plus `@` plus the first 7 characters of `GITHUB_SHA`, unless you set `release` or `TALARIA_RELEASE`. The same value is the `release` output.
 
 ## Usage
 
+### Source maps only
+
 ```yaml
-- uses: newtalaria/source-maps@v1
-  id: maps
+- uses: newtalaria/release@v1
+  id: release
   with:
-    path: source-maps
+    sourcemaps: dist
   env:
     TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
 ```
 
-`TALARIA_RELEASE_KEY` is an API key with only `releases:write`. Put it in the environment. The action reads that variable and does not take the key as an input, so the value is not stored with the step inputs.
-
-A later step can read the release that was uploaded:
+### Release with commits
 
 ```yaml
-- run: echo "${{ steps.maps.outputs.release }}"
+- uses: newtalaria/release@v1
+  with:
+    set-commits: auto
+  env:
+    TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
 ```
 
-To share that string with the app build, set it before both steps:
+### Source maps and commits
+
+```yaml
+- uses: newtalaria/release@v1
+  with:
+    sourcemaps: dist
+    set-commits: auto
+  env:
+    TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
+```
+
+`TALARIA_RELEASE_KEY` is an API key with `releases:write` scope. Put it in the environment as a repository secret. The action reads that variable and does not take the key as an input, so the value is not stored with the step inputs.
+
+## Sharing the release with your build
+
+To ensure your app and Talaria use the same release string, set it before both the build and this action:
 
 ```yaml
 - name: Release identity
@@ -35,32 +54,42 @@ To share that string with the app build, set it before both steps:
 - name: Build
   run: NEXT_PUBLIC_TALARIA_RELEASE="$TALARIA_RELEASE" npm run build
 
-- uses: newtalaria/source-maps@v1
+- uses: newtalaria/release@v1
   with:
-    path: dist
+    sourcemaps: dist
+    set-commits: auto
   env:
     TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
 ```
 
-`TALARIA_RELEASE` wins over the GitHub ref, so the maps and the events use one string.
+`TALARIA_RELEASE` takes precedence over the GitHub ref, so both use one string.
 
 ## Inputs
 
-| Name | Required | Default |
-| --- | --- | --- |
-| `path` | yes | Directory of built `*.js.map` files, relative to the workspace. |
-| `url` | no | `https://ingest.newtalaria.com`, or `TALARIA_BASE_URL` when that variable is set and `url` is omitted. |
-| `release` | no | `TALARIA_RELEASE`, then `NEXT_PUBLIC_TALARIA_RELEASE`, then `GITHUB_REF_NAME` @ the first 7 characters of `GITHUB_SHA`. |
-| `silverstripe-combine-files` | no | `true` when the uploaded script is the first file in `Requirements::combine_files`. The map's generated lines shift by Silverstripe's one-line header. Deploy the rewritten `.js` as that first file. |
+| Name | Required | Default | Description |
+| --- | --- | --- | --- |
+| `sourcemaps` | no | | Directory of built `*.js.map` files, relative to the workspace. When omitted, no source maps are uploaded. |
+| `set-commits` | no | | Set to `auto` to associate commits with the release. When omitted, no commits are set. |
+| `url` | no | `https://ingest.newtalaria.com` | Talaria API base URL. `TALARIA_URL` is used when this input is omitted and the env var is set. |
+| `release` | no | `TALARIA_RELEASE`, then `NEXT_PUBLIC_TALARIA_RELEASE`, then `GITHUB_REF_NAME@<shortsha>` | Release string. |
+| `silverstripe-combine-files` | no | `false` | Set to `true` when the uploaded script is the first file in Silverstripe `Requirements::combine_files`. The map's generated lines shift by one for the header. |
 
 `http://localhost` and `http://127.0.0.1` are accepted for a local API. Any other URL must be `https`.
 
-## Output
+## Outputs
 
 | Name | Description |
 | --- | --- |
-| `release` | Release string sent with each map. Set before the upload starts. |
+| `release` | Release string used |
+| `commit-sha` | Full commit SHA for the release |
 
 ## When the step fails
 
-The step fails, and does not upload, when the key is missing, the release cannot be resolved, `path` is not a directory inside the workspace, or the API URL is not allowed. It also fails when any file fails to upload. Maps that were stored before a later file failed stay stored. The action does not retry, and it does not print the API key.
+The step fails when:
+- The `TALARIA_RELEASE_KEY` is missing or invalid
+- The release cannot be resolved
+- `sourcemaps` is provided but is not a directory inside the workspace
+- The API URL is not allowed
+- Any file fails to upload (maps stored before a failure remain stored)
+
+The action does not retry, and it does not print the API key.

@@ -19844,9 +19844,9 @@ function nonEmpty(value) {
 
 // src/config.ts
 var DEFAULT_API_URL = "https://ingest.newtalaria.com";
-var KEY_IN_TEXT = /tal_live_[A-Za-z0-9_-]+/g;
+var KEY_IN_TEXT = /tal_(prod|stg|test|dev)_[A-Za-z0-9_-]+/g;
 function scrubSecrets(line) {
-  return line.replace(KEY_IN_TEXT, "tal_live_[redacted]");
+  return line.replace(KEY_IN_TEXT, "tal_***_[redacted]");
 }
 function resolveApiUrl(inputUrl, envUrl) {
   const raw = inputUrl.trim() || envUrl?.trim() || DEFAULT_API_URL;
@@ -19859,7 +19859,7 @@ function assertSafeUrl(url) {
   } catch {
     throw new Error("API URL is not a valid URL");
   }
-  if (parsed.username || parsed.password || /tal_live_/i.test(url)) {
+  if (parsed.username || parsed.password || /tal_(prod|stg|test|dev)_/i.test(url)) {
     throw new Error("API URL must not include credentials");
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
@@ -20367,37 +20367,48 @@ async function run(io) {
       release: io.getInput("release"),
       env: io.env
     });
-    const url = resolveApiUrl(io.getInput("url"), io.env.TALARIA_BASE_URL);
+    const url = resolveApiUrl(io.getInput("url"), io.env.TALARIA_URL);
     assertSafeUrl(url);
-    const directory = resolveMapDirectory(io.workspace, io.getInput("path"));
-    const infoStat = await (0, import_promises2.stat)(directory).catch(() => void 0);
-    if (!infoStat?.isDirectory()) {
-      throw new Error("path is not a directory of built source maps");
-    }
+    const sourcemapsPath = io.getInput("sourcemaps").trim();
+    const setCommits = io.getInput("set-commits").trim().toLowerCase();
     io.setOutput("release", release);
+    const commitSha = io.env.GITHUB_SHA ?? io.env.CI_COMMIT_SHA ?? "";
+    if (commitSha) {
+      io.setOutput("commit-sha", commitSha);
+    }
     const env = { ...io.env, TALARIA_RELEASE_KEY: key };
     delete env.TALARIA_API_KEY;
-    const argv = [
-      "sourcemaps",
-      "upload",
-      directory,
-      "--release",
-      release,
-      "--url",
-      url
-    ];
-    if (io.getInput("silverstripe-combine-files").trim().toLowerCase() === "true") {
-      argv.push("--silverstripe-combine-files");
+    if (sourcemapsPath) {
+      const directory = resolveMapDirectory(io.workspace, sourcemapsPath);
+      const infoStat = await (0, import_promises2.stat)(directory).catch(() => void 0);
+      if (!infoStat?.isDirectory()) {
+        throw new Error("sourcemaps path is not a directory of built source maps");
+      }
+      const argv = [
+        "sourcemaps",
+        "upload",
+        directory,
+        "--release",
+        release,
+        "--url",
+        url
+      ];
+      if (io.getInput("silverstripe-combine-files").trim().toLowerCase() === "true") {
+        argv.push("--silverstripe-combine-files");
+      }
+      const code = await upload({
+        cwd: io.workspace,
+        argv,
+        env,
+        log: info2,
+        error: error2
+      });
+      if (code !== 0) {
+        throw new Error("Source map upload failed");
+      }
     }
-    const code = await upload({
-      cwd: io.workspace,
-      argv,
-      env,
-      log: info2,
-      error: error2
-    });
-    if (code !== 0) {
-      throw new Error("Source map upload failed");
+    if (setCommits === "auto") {
+      info2("set-commits: auto - This will be implemented with the CLI releases command");
     }
   } catch (err) {
     io.setFailed(scrubSecrets(err instanceof Error ? err.message : String(err)));

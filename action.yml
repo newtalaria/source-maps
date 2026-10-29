@@ -1,21 +1,28 @@
-name: Talaria source maps
-description: Upload built JavaScript source maps to Talaria for a release
+name: Talaria release
+description: Create a Talaria release with commits and source maps for GitHub Actions workflows
 author: Talaria
 branding:
   icon: upload-cloud
   color: blue
 inputs:
-  path:
-    description: Directory of built *.js.map files, relative to the workspace
-    required: true
+  sourcemaps:
+    description: >-
+      Directory of built *.js.map files to upload, relative to the workspace.
+      When omitted, no source maps are uploaded.
+    required: false
+  set-commits:
+    description: >-
+      Set to 'auto' to associate commits with the release. Computes the commit
+      range from the API response. When omitted, no commits are set.
+    required: false
   url:
     description: >-
       Talaria API base URL. Defaults to https://ingest.newtalaria.com.
-      TALARIA_BASE_URL is used when this input is omitted.
+      TALARIA_URL is used when this input is omitted.
     required: false
   release:
     description: >-
-      Release string sent with each map. Defaults to TALARIA_RELEASE, then
+      Release string. Defaults to TALARIA_RELEASE, then
       NEXT_PUBLIC_TALARIA_RELEASE, then GITHUB_REF_NAME@ the first 7 characters
       of GITHUB_SHA.
     required: false
@@ -28,7 +35,9 @@ inputs:
     default: 'false'
 outputs:
   release:
-    description: Release string used for the upload
+    description: Release string used
+  commit-sha:
+    description: Full commit SHA for the release
 runs:
   using: node24
   main: dist/index.js

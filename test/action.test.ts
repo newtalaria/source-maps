@@ -13,7 +13,7 @@ import {
 import { run, type ActionIo } from '../src/run.js';
 
 const SHA = 'abcdef0123456789abcdef0123456789abcdef01';
-const KEY = 'tal_live_supersecretkey';
+const KEY = 'tal_prod_supersecretkey';
 
 function githubEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -37,7 +37,7 @@ function harness(options: {
   inputs?: Record<string, string>;
   upload?: (options: UploadSourceMapsOptions) => Promise<number>;
 }) {
-  const inputs = options.inputs ?? { path: 'source-maps' };
+  const inputs = options.inputs ?? { sourcemaps: 'source-maps' };
   const secrets: string[] = [];
   const outputs: string[] = [];
   const failed: string[] = [];
@@ -139,10 +139,10 @@ describe('release and url', () => {
   });
 
   it('scrubs API keys from text', () => {
-    const line = scrubSecrets(`upload failed for ${KEY} and tal_live_other-key`);
+    const line = scrubSecrets(`upload failed for ${KEY} and tal_stg_other-key`);
     assert.equal(line.includes(KEY), false);
     assert.equal(line.includes('other-key'), false);
-    assert.match(line, /tal_live_\[redacted\]/);
+    assert.match(line, /tal_\*\*\*_\[redacted\]/);
   });
 });
 
@@ -153,7 +153,8 @@ describe('upload action', () => {
     await run(io);
     assert.deepEqual(failed, []);
     assert.deepEqual(secrets, [KEY]);
-    assert.deepEqual(outputs, ['release=main@abcdef0']);
+    assert.ok(outputs.includes('release=main@abcdef0'));
+    assert.ok(outputs.includes(`commit-sha=${SHA}`));
     assert.equal(uploads.length, 1);
     assert.deepEqual(uploads[0]!.argv, [
       'sourcemaps',
@@ -172,16 +173,16 @@ describe('upload action', () => {
     const root = await workspace();
     const { io, outputs, uploads } = harness({
       root,
-      inputs: { path: 'source-maps', release: '9.9.9' },
-      env: githubEnv({ TALARIA_API_KEY: 'tal_live_ingestkeyvalue' }),
+      inputs: { sourcemaps: 'source-maps', release: '9.9.9' },
+      env: githubEnv({ TALARIA_API_KEY: 'tal_prod_ingestkeyvalue' }),
     });
     await run(io);
-    assert.deepEqual(outputs, ['release=9.9.9']);
+    assert.ok(outputs.includes('release=9.9.9'));
     assert.equal(uploads[0]!.argv.includes('--api-key'), false);
     assert.ok(uploads[0]!.argv.includes('9.9.9'));
     assert.equal(uploads[0]!.env.TALARIA_API_KEY, undefined);
     assert.equal(
-      JSON.stringify(uploads[0]).includes('tal_live_ingestkeyvalue'),
+      JSON.stringify(uploads[0]).includes('tal_prod_ingestkeyvalue'),
       false,
     );
   });
@@ -207,16 +208,16 @@ describe('upload action', () => {
     });
     await run(io);
     assert.equal(uploads.length, 0);
-    assert.deepEqual(outputs, []);
+    assert.equal(outputs.length, 0);
     assert.equal(failed.length, 1);
     assert.equal(failed[0]!.includes('local'), false);
   });
 
-  it('rejects a path that escapes the workspace', async () => {
+  it('rejects a sourcemaps path that escapes the workspace', async () => {
     const root = await workspace();
     const { io, failed, uploads } = harness({
       root,
-      inputs: { path: '../outside' },
+      inputs: { sourcemaps: '../outside' },
     });
     await run(io);
     assert.equal(uploads.length, 0);
@@ -227,7 +228,7 @@ describe('upload action', () => {
     const root = await workspace();
     const { io, failed, uploads } = harness({
       root,
-      inputs: { path: 'source-maps', url: 'http://evil.example' },
+      inputs: { sourcemaps: 'source-maps', url: 'http://evil.example' },
     });
     await run(io);
     assert.equal(uploads.length, 0);
@@ -245,8 +246,8 @@ describe('upload action', () => {
     await run(thrown.io);
     assert.equal(thrown.failed.length, 1);
     assert.equal(thrown.failed[0]!.includes(KEY), false);
-    assert.match(thrown.failed[0]!, /tal_live_\[redacted\]/);
-    assert.deepEqual(thrown.outputs, ['release=main@abcdef0']);
+    assert.match(thrown.failed[0]!, /tal_\*\*\*_\[redacted\]/);
+    assert.ok(thrown.outputs.includes('release=main@abcdef0'));
 
     const logged = harness({
       root,
@@ -257,7 +258,7 @@ describe('upload action', () => {
     });
     await run(logged.io);
     assert.equal(logged.errors.join('\n').includes(KEY), false);
-    assert.match(logged.errors.join('\n'), /tal_live_\[redacted\]/);
+    assert.match(logged.errors.join('\n'), /tal_\*\*\*_\[redacted\]/);
     assert.deepEqual(logged.failed, ['Source map upload failed']);
   });
 
@@ -265,7 +266,7 @@ describe('upload action', () => {
     const root = await workspace();
     const { io, failed, uploads } = harness({
       root,
-      inputs: { path: 'source-maps', 'silverstripe-combine-files': 'true' },
+      inputs: { sourcemaps: 'source-maps', 'silverstripe-combine-files': 'true' },
     });
     await run(io);
     assert.deepEqual(failed, []);
@@ -279,7 +280,33 @@ describe('upload action', () => {
       upload: async () => 1,
     });
     await run(io);
-    assert.deepEqual(outputs, ['release=main@abcdef0']);
+    assert.ok(outputs.includes('release=main@abcdef0'));
     assert.deepEqual(failed, ['Source map upload failed']);
+  });
+
+  it('does not require sourcemaps input when only setting commits', async () => {
+    const root = await workspace();
+    const { io, secrets, outputs, failed, uploads, infos } = harness({
+      root,
+      inputs: { 'set-commits': 'auto' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    assert.deepEqual(secrets, [KEY]);
+    assert.ok(outputs.includes('release=main@abcdef0'));
+    assert.equal(uploads.length, 0);
+    assert.ok(infos.some((msg) => msg.includes('set-commits: auto')));
+  });
+
+  it('handles both sourcemaps and set-commits', async () => {
+    const root = await workspace();
+    const { io, failed, uploads, infos } = harness({
+      root,
+      inputs: { sourcemaps: 'source-maps', 'set-commits': 'auto' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    assert.equal(uploads.length, 1);
+    assert.ok(infos.some((msg) => msg.includes('set-commits: auto')));
   });
 });
