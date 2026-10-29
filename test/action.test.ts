@@ -1,19 +1,31 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { describe, it } from 'node:test';
-import type { UploadSourceMapsOptions } from '@newtalaria/cli';
 import {
   assertSafeUrl,
   resolveActionRelease,
-  resolveApiUrl,
-  scrubSecrets,
+  resolveIngestUrl,
 } from '../src/config.js';
+import {
+  buildApiKey,
+  buildMonitorToken,
+  crc32ieee,
+  encodeBase62,
+  parseReleaseKey,
+  scrubSecrets,
+} from '../src/key.js';
+import { describeProblem } from '../src/problem.js';
+import { RELEASE_NAME } from '../src/release.js';
 import { run, type ActionIo } from '../src/run.js';
+import type { ReleaseCommit } from '../src/commits.js';
 
 const SHA = 'abcdef0123456789abcdef0123456789abcdef01';
-const KEY = 'tal_live_supersecretkey';
+const PREV = '1234567890abcdef1234567890abcdef12345678';
+const KEY = buildApiKey({ class: 'sk', env: 'prod', cell: 'nz1' });
 
 function githubEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -26,24 +38,41 @@ function githubEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 async function workspace(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), 'talaria-action-'));
-  await mkdir(path.join(root, 'source-maps'));
+  const root = await mkdtemp(path.join(tmpdir(), 'talaria-release-'));
+  await mkdir(path.join(root, 'dist'));
+  await writeFile(path.join(root, 'dist', 'app.js'), 'console.log(1)\n');
+  await writeFile(
+    path.join(root, 'dist', 'app.js.map'),
+    `${JSON.stringify({ version: 3, mappings: 'AAAA', sources: ['app.ts'] })}\n`,
+  );
   return root;
+}
+
+function jsonResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  });
 }
 
 function harness(options: {
   root: string;
   env?: NodeJS.ProcessEnv;
   inputs?: Record<string, string>;
-  upload?: (options: UploadSourceMapsOptions) => Promise<number>;
+  fetch?: typeof fetch;
+  listCommits?: (input: { commitSha: string; previousCommitSha?: string }) => ReleaseCommit[];
 }) {
-  const inputs = options.inputs ?? { path: 'source-maps' };
+  const inputs = options.inputs ?? {};
   const secrets: string[] = [];
   const outputs: string[] = [];
   const failed: string[] = [];
   const errors: string[] = [];
   const infos: string[] = [];
-  const uploads: UploadSourceMapsOptions[] = [];
+  const requests: { url: string; init: RequestInit }[] = [];
   const io: ActionIo = {
     getInput: (name) => inputs[name] ?? '',
     setOutput: (name, value) => {
@@ -63,223 +92,474 @@ function harness(options: {
     },
     env: options.env ?? githubEnv(),
     workspace: options.root,
-    upload: async (uploadOptions) => {
-      uploads.push(uploadOptions);
-      if (options.upload) return options.upload(uploadOptions);
-      return 0;
-    },
+    fetch:
+      options.fetch ??
+      (async (url, init) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        const pathname = new URL(String(url)).pathname;
+        if (pathname === '/v1/releases') {
+          return jsonResponse(200, {
+            release: 'main@abcdef0',
+            commitCount: 0,
+            previousReleaseCommitSha: null,
+          });
+        }
+        if (pathname === '/v1/source-maps') {
+          return jsonResponse(200, { id: 'map_1' });
+        }
+        return jsonResponse(404, {
+          type: 'https://newtalaria.com/docs/reference/errors#not_found',
+          title: 'Not found',
+          status: 404,
+          detail: `No route ${pathname}`,
+          code: 'not_found',
+          requestId: 'req_missing',
+        });
+      }),
+    listCommits: options.listCommits,
   };
-  return { io, secrets, outputs, failed, errors, infos, uploads };
+  return { io, secrets, outputs, failed, errors, infos, requests };
 }
 
-describe('release and url', () => {
-  it('derives branch@shortSha from GitHub', () => {
-    assert.equal(
-      resolveActionRelease({
-        env: { GITHUB_REF_NAME: 'main', GITHUB_SHA: SHA },
-      }),
-      'main@abcdef0',
+function bodyOf(request: { init: RequestInit }): Record<string, unknown> {
+  return JSON.parse(String(request.init.body)) as Record<string, unknown>;
+}
+
+function header(request: { init: RequestInit }, name: string): string | undefined {
+  const headers = request.init.headers as Record<string, string>;
+  return headers[name];
+}
+
+describe('key grammar and checksum', () => {
+  it('uses CRC32/IEEE and base62 0-9A-Za-z', () => {
+    assert.equal(crc32ieee('123456789'), 0xcbf43926);
+    assert.equal(encodeBase62(0), '000000');
+    assert.equal(encodeBase62(10), '00000A');
+    assert.equal(encodeBase62(36), '00000a');
+    assert.equal(encodeBase62(62), '000010');
+  });
+
+  it('accepts an sk key and reads the cell', () => {
+    assert.deepEqual(parseReleaseKey(KEY), { env: 'prod', cell: 'nz1' });
+    const dedicated = buildApiKey({ class: 'sk', env: 'stg', cell: 'eu1-k7m2p9' });
+    assert.deepEqual(parseReleaseKey(dedicated), { env: 'stg', cell: 'eu1-k7m2p9' });
+  });
+
+  it('refuses pk keys, monitor tokens, class-less keys, and a bad checksum', () => {
+    const pk = buildApiKey({ class: 'pk', env: 'prod', cell: 'nz1' });
+    assert.throws(() => parseReleaseKey(pk), /Publishable keys/);
+    assert.throws(() => parseReleaseKey(buildMonitorToken({ cell: 'nz1' })), /Monitor tokens/);
+    assert.throws(() => parseReleaseKey(`tal_prod_nz1_${'A'.repeat(49)}`), /not a valid tal_sk_ key/);
+    const flipped = `${KEY.slice(0, -1)}${KEY.endsWith('0') ? '1' : '0'}`;
+    assert.throws(() => parseReleaseKey(flipped), /checksum is invalid/);
+    assert.throws(
+      () => parseReleaseKey(buildApiKey({ class: 'sk', env: 'prod', cell: 'a' })),
+      /not a valid tal_sk_ key/,
+    );
+    assert.throws(
+      () => parseReleaseKey(buildApiKey({ class: 'sk', env: 'prod', cell: `a${'b'.repeat(24)}` })),
+      /not a valid tal_sk_ key/,
     );
   });
 
-  it('prefers an explicit release over TALARIA_RELEASE and GitHub', () => {
+  it('scrubs sk, pk, and mon secrets and leaves class-less text', () => {
+    const pk = buildApiKey({ class: 'pk', env: 'dev', cell: 'nz1' });
+    const mon = buildMonitorToken({ cell: 'nz1' });
+    const line = scrubSecrets(`failed ${KEY} ${pk} ${mon}`);
+    assert.equal(line.includes(KEY), false);
+    assert.equal(line.includes(pk), false);
+    assert.equal(line.includes(mon), false);
+    assert.equal(line, 'failed [redacted] [redacted] [redacted]');
+    const classLess = `tal_prod_nz1_${'A'.repeat(49)}`;
+    assert.equal(scrubSecrets(classLess), classLess);
+  });
+});
+
+describe('release name and ingest URL', () => {
+  it('derives branch@shortSha and maps / to -', () => {
     assert.equal(
       resolveActionRelease({
-        release: '2.0.0',
+        env: { GITHUB_REF_NAME: 'feature/x', GITHUB_SHA: SHA },
+      }),
+      'feature-x@abcdef0',
+    );
+    assert.equal(RELEASE_NAME.test('feature-x@abcdef0'), true);
+  });
+
+  it('keeps an explicit release and rejects a slash in it', () => {
+    assert.equal(
+      resolveActionRelease({
+        release: '2.0.0+build',
         env: githubEnv({ TALARIA_RELEASE: '1.4.2' }),
       }),
-      '2.0.0',
+      '2.0.0+build',
+    );
+    assert.throws(
+      () =>
+        resolveActionRelease({
+          release: 'feature/x@abcdef0',
+          env: githubEnv(),
+        }),
+      /does not match/,
     );
   });
 
-  it('prefers TALARIA_RELEASE over GitHub', () => {
+  it('prefers TALARIA_RELEASE over GitHub and fails closed without a release', () => {
     assert.equal(
       resolveActionRelease({
         env: githubEnv({ TALARIA_RELEASE: '1.4.2' }),
       }),
       '1.4.2',
     );
-  });
-
-  it('fails closed when GitHub cannot supply a release', () => {
     assert.throws(
       () => resolveActionRelease({ env: { TALARIA_COMMIT_SHA: SHA } }),
       /Could not resolve a Talaria release/,
     );
   });
 
-  it('defaults the API URL to the hosted ingest host', () => {
-    assert.equal(resolveApiUrl('', undefined), 'https://ingest.newtalaria.com');
+  it('derives the cell host unless TALARIA_URL or url is set', () => {
     assert.equal(
-      resolveApiUrl('', 'https://example.test/'),
+      resolveIngestUrl({ urlInput: '', envUrl: undefined, cell: 'nz1' }),
+      'https://ingest-nz1.newtalaria.com',
+    );
+    assert.equal(
+      resolveIngestUrl({ urlInput: '', envUrl: 'https://example.test/', cell: 'nz1' }),
       'https://example.test',
     );
     assert.equal(
-      resolveApiUrl('https://custom.test', 'https://example.test'),
+      resolveIngestUrl({
+        urlInput: 'https://custom.test',
+        envUrl: 'https://example.test',
+        cell: 'nz1',
+      }),
       'https://custom.test',
+    );
+    assert.throws(
+      () => resolveIngestUrl({ urlInput: '', envUrl: undefined, cell: 'self' }),
+      /self-hosted cell needs TALARIA_URL/,
     );
   });
 
   it('rejects credentials and non-https URLs', () => {
-    assert.doesNotThrow(() => assertSafeUrl('https://ingest.newtalaria.com'));
+    assert.doesNotThrow(() => assertSafeUrl('https://ingest-nz1.newtalaria.com'));
     assert.doesNotThrow(() => assertSafeUrl('http://localhost:8080'));
     assert.doesNotThrow(() => assertSafeUrl('http://127.0.0.1:8080'));
+    assert.throws(() => assertSafeUrl('http://evil.example'), /API URL must use https/);
     assert.throws(
-      () => assertSafeUrl('http://evil.example'),
-      /API URL must use https/,
-    );
-    assert.throws(
-      () => assertSafeUrl('https://user:secret@ingest.newtalaria.com'),
+      () => assertSafeUrl('https://user:secret@ingest-nz1.newtalaria.com'),
       /must not include credentials/,
     );
     assert.throws(
-      () => assertSafeUrl(`https://ingest.newtalaria.com/?key=${KEY}`),
+      () => assertSafeUrl(`https://ingest-nz1.newtalaria.com/?key=${KEY}`),
       /must not include credentials/,
     );
-  });
-
-  it('scrubs API keys from text', () => {
-    const line = scrubSecrets(`upload failed for ${KEY} and tal_live_other-key`);
-    assert.equal(line.includes(KEY), false);
-    assert.equal(line.includes('other-key'), false);
-    assert.match(line, /tal_live_\[redacted\]/);
   });
 });
 
-describe('upload action', () => {
-  it('uploads with the derived release and sets the output', async () => {
+describe('problem+json', () => {
+  it('formats code, detail, request id, cell, and url', () => {
+    const message = describeProblem({
+      status: 421,
+      requestId: null,
+      body: JSON.stringify({
+        type: 'https://newtalaria.com/docs/reference/errors#wrong_cell',
+        title: 'Wrong cell',
+        status: 421,
+        detail: 'Send this key to its cell',
+        code: 'wrong_cell',
+        requestId: 'req_abc',
+        cell: 'eu1',
+        url: 'https://ingest-eu1.newtalaria.com',
+      }),
+    });
+    assert.match(message, /HTTP 421 wrong_cell/);
+    assert.match(message, /Send this key to its cell/);
+    assert.match(message, /cell eu1/);
+    assert.match(message, /https:\/\/ingest-eu1\.newtalaria\.com/);
+    assert.match(message, /requestId req_abc/);
+  });
+});
+
+describe('release action', () => {
+  it('posts the release to the derived cell host with a bearer sk key', async () => {
     const root = await workspace();
-    const { io, secrets, outputs, failed, uploads } = harness({ root });
+    const { io, secrets, outputs, failed, requests } = harness({ root });
     await run(io);
     assert.deepEqual(failed, []);
     assert.deepEqual(secrets, [KEY]);
-    assert.deepEqual(outputs, ['release=main@abcdef0']);
-    assert.equal(uploads.length, 1);
-    assert.deepEqual(uploads[0]!.argv, [
-      'sourcemaps',
-      'upload',
-      path.join(root, 'source-maps'),
-      '--release',
-      'main@abcdef0',
-      '--url',
-      'https://ingest.newtalaria.com',
-    ]);
-    assert.equal(uploads[0]!.env.TALARIA_RELEASE_KEY, KEY);
-    assert.equal(uploads[0]!.env.TALARIA_API_KEY, undefined);
+    assert.deepEqual(outputs, [`release=main@abcdef0`, `commit-sha=${SHA}`]);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.url, 'https://ingest-nz1.newtalaria.com/v1/releases');
+    assert.equal(header(requests[0]!, 'Authorization'), `Bearer ${KEY}`);
+    assert.equal(header(requests[0]!, 'X-API-Key'), undefined);
+    assert.deepEqual(bodyOf(requests[0]!), {
+      release: 'main@abcdef0',
+      commitSha: SHA,
+    });
   });
 
-  it('passes an explicit release and drops TALARIA_API_KEY', async () => {
+  it('uses TALARIA_URL and ignores TALARIA_BASE_URL', async () => {
     const root = await workspace();
-    const { io, outputs, uploads } = harness({
+    const { io, requests, failed } = harness({
       root,
-      inputs: { path: 'source-maps', release: '9.9.9' },
-      env: githubEnv({ TALARIA_API_KEY: 'tal_live_ingestkeyvalue' }),
-    });
-    await run(io);
-    assert.deepEqual(outputs, ['release=9.9.9']);
-    assert.equal(uploads[0]!.argv.includes('--api-key'), false);
-    assert.ok(uploads[0]!.argv.includes('9.9.9'));
-    assert.equal(uploads[0]!.env.TALARIA_API_KEY, undefined);
-    assert.equal(
-      JSON.stringify(uploads[0]).includes('tal_live_ingestkeyvalue'),
-      false,
-    );
-  });
-
-  it('does not upload when the key is missing', async () => {
-    const root = await workspace();
-    const { io, failed, uploads } = harness({
-      root,
-      env: { GITHUB_REF_NAME: 'main', GITHUB_SHA: SHA },
-    });
-    await run(io);
-    assert.equal(uploads.length, 0);
-    assert.equal(failed.length, 1);
-    assert.match(failed[0]!, /TALARIA_RELEASE_KEY/);
-    assert.equal(failed[0]!.includes('local'), false);
-  });
-
-  it('does not upload or fall back to local when the release is missing', async () => {
-    const root = await workspace();
-    const { io, failed, uploads, outputs } = harness({
-      root,
-      env: { TALARIA_RELEASE_KEY: KEY },
-    });
-    await run(io);
-    assert.equal(uploads.length, 0);
-    assert.deepEqual(outputs, []);
-    assert.equal(failed.length, 1);
-    assert.equal(failed[0]!.includes('local'), false);
-  });
-
-  it('rejects a path that escapes the workspace', async () => {
-    const root = await workspace();
-    const { io, failed, uploads } = harness({
-      root,
-      inputs: { path: '../outside' },
-    });
-    await run(io);
-    assert.equal(uploads.length, 0);
-    assert.match(failed[0]!, /inside the workspace/);
-  });
-
-  it('rejects a non-https API URL before upload', async () => {
-    const root = await workspace();
-    const { io, failed, uploads } = harness({
-      root,
-      inputs: { path: 'source-maps', url: 'http://evil.example' },
-    });
-    await run(io);
-    assert.equal(uploads.length, 0);
-    assert.match(failed[0]!, /https/);
-  });
-
-  it('scrubs a key from a thrown upload error and from CLI logs', async () => {
-    const root = await workspace();
-    const thrown = harness({
-      root,
-      upload: async () => {
-        throw new Error(`Talaria rejected ${KEY}`);
-      },
-    });
-    await run(thrown.io);
-    assert.equal(thrown.failed.length, 1);
-    assert.equal(thrown.failed[0]!.includes(KEY), false);
-    assert.match(thrown.failed[0]!, /tal_live_\[redacted\]/);
-    assert.deepEqual(thrown.outputs, ['release=main@abcdef0']);
-
-    const logged = harness({
-      root,
-      upload: async (options) => {
-        options.error?.(`main.js: ${KEY}`);
-        return 1;
-      },
-    });
-    await run(logged.io);
-    assert.equal(logged.errors.join('\n').includes(KEY), false);
-    assert.match(logged.errors.join('\n'), /tal_live_\[redacted\]/);
-    assert.deepEqual(logged.failed, ['Source map upload failed']);
-  });
-
-  it('passes Silverstripe combine mode through to the CLI', async () => {
-    const root = await workspace();
-    const { io, failed, uploads } = harness({
-      root,
-      inputs: { path: 'source-maps', 'silverstripe-combine-files': 'true' },
+      env: githubEnv({
+        TALARIA_URL: 'https://override.example/',
+        TALARIA_BASE_URL: 'https://old.example',
+        TALARIA_API_KEY: buildApiKey({ class: 'pk', env: 'prod', cell: 'eu1' }),
+      }),
     });
     await run(io);
     assert.deepEqual(failed, []);
-    assert.equal(uploads[0]!.argv.at(-1), '--silverstripe-combine-files');
+    assert.equal(requests[0]!.url, 'https://override.example/v1/releases');
+    assert.equal(header(requests[0]!, 'Authorization'), `Bearer ${KEY}`);
   });
 
-  it('fails the step when the CLI exits non-zero', async () => {
+  it('posts source maps as plain JSON and ignores the old sourcemaps input', async () => {
+    const root = await workspace();
+    const ignored = harness({
+      root,
+      inputs: { sourcemaps: 'dist' },
+    });
+    await run(ignored.io);
+    assert.equal(
+      ignored.requests.some((request) => request.url.endsWith('/v1/source-maps')),
+      false,
+    );
+
+    const { io, failed, requests } = harness({
+      root,
+      inputs: { 'source-maps': 'dist' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    const upload = requests.find((request) => request.url.endsWith('/v1/source-maps'));
+    assert.ok(upload);
+    assert.equal(upload.url, 'https://ingest-nz1.newtalaria.com/v1/source-maps');
+    const payload = bodyOf(upload);
+    assert.equal(payload.release, 'main@abcdef0');
+    assert.equal(payload.fileName, 'app.js');
+    assert.equal(typeof payload.debugId, 'string');
+    assert.equal('__className__' in payload, false);
+    assert.equal('input' in payload, false);
+    const map = JSON.parse(gunzipSync(Buffer.from(String(payload.gzipBytes), 'base64')).toString('utf8')) as {
+      mappings: string;
+      debugId: string;
+    };
+    assert.equal(map.mappings, 'AAAA');
+    assert.equal(map.debugId, payload.debugId);
+    assert.equal(String(payload.gzipBytes).includes('decode('), false);
+  });
+
+  it('shifts Silverstripe combine-files mappings by one line', async () => {
+    const root = await workspace();
+    const { io, failed, requests } = harness({
+      root,
+      inputs: { 'source-maps': 'dist', 'silverstripe-combine-files': 'true' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    const upload = requests.find((request) => request.url.endsWith('/v1/source-maps'));
+    const payload = bodyOf(upload!);
+    const map = JSON.parse(gunzipSync(Buffer.from(String(payload.gzipBytes), 'base64')).toString('utf8')) as {
+      mappings: string;
+    };
+    assert.equal(map.mappings, ';AAAA');
+  });
+
+  it('sends previous..HEAD when set-commits is auto', async () => {
+    const root = await workspace();
+    const head: ReleaseCommit = {
+      id: SHA,
+      authorName: 'Ada',
+      authorEmail: 'ada@example.com',
+      timestamp: '2026-10-29T00:00:00Z',
+      message: 'head',
+    };
+    const older: ReleaseCommit = {
+      id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      authorName: 'Ada',
+      authorEmail: 'ada@example.com',
+      timestamp: '2026-10-28T00:00:00Z',
+      message: 'older',
+    };
+    let releaseCalls = 0;
+    const { io, failed, requests, infos } = harness({
+      root,
+      inputs: { 'set-commits': 'auto' },
+      listCommits: ({ previousCommitSha }) => (previousCommitSha ? [older, head] : [head]),
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        releaseCalls += 1;
+        return jsonResponse(200, {
+          release: 'main@abcdef0',
+          commitCount: releaseCalls === 1 ? 1 : 2,
+          previousReleaseCommitSha: releaseCalls === 1 ? PREV : null,
+        });
+      },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    const posts = requests.filter((request) => request.url.endsWith('/v1/releases'));
+    assert.equal(posts.length, 2);
+    assert.deepEqual(bodyOf(posts[0]!).commits, [head]);
+    assert.deepEqual(bodyOf(posts[1]!).commits, [older, head]);
+    assert.equal(
+      requests.some((request) => request.url.endsWith('/v1/deploys')),
+      false,
+    );
+    assert.ok(infos.some((line) => line.includes('2 commits') && line.includes(PREV.slice(0, 7))));
+  });
+
+  it('reads commits from git for set-commits auto', async () => {
+    const root = await workspace();
+    execFileSync('git', ['init', '-q'], { cwd: root, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'ada@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Ada'], { cwd: root });
+    execFileSync('git', ['add', 'dist'], { cwd: root });
+    execFileSync('git', ['commit', '-m', 'first release'], { cwd: root });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    const { io, failed, requests } = harness({
+      root,
+      env: githubEnv({ GITHUB_SHA: head }),
+      inputs: { 'set-commits': 'auto' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    const posts = requests.filter((request) => request.url.endsWith('/v1/releases'));
+    assert.equal(posts.length, 1);
+    const commits = bodyOf(posts[0]!).commits as ReleaseCommit[];
+    assert.equal(commits[0]?.id, head);
+    assert.equal(commits[0]?.message, 'first release');
+    assert.equal(commits[0]?.authorName, 'Ada');
+  });
+
+  it('does not call /v1/deploys when deploy is true', async () => {
+    const root = await workspace();
+    const { io, failed, requests, infos } = harness({
+      root,
+      inputs: { deploy: 'true' },
+    });
+    await run(io);
+    assert.deepEqual(failed, []);
+    assert.equal(
+      requests.some((request) => request.url.includes('/v1/deploys')),
+      false,
+    );
+    assert.ok(infos.some((line) => line.includes('501')));
+  });
+
+  it('parses a problem+json error and does not echo the key', async () => {
     const root = await workspace();
     const { io, failed, outputs } = harness({
       root,
-      upload: async () => 1,
+      fetch: async () =>
+        jsonResponse(
+          401,
+          {
+            type: 'https://newtalaria.com/docs/reference/errors#invalid_key',
+            title: 'Invalid key',
+            status: 401,
+            detail: `Rejected ${KEY}`,
+            code: 'invalid_key',
+            requestId: 'req_auth',
+          },
+          { 'Content-Type': 'application/problem+json', 'Request-Id': 'req_auth' },
+        ),
     });
     await run(io);
-    assert.deepEqual(outputs, ['release=main@abcdef0']);
-    assert.deepEqual(failed, ['Source map upload failed']);
+    assert.equal(failed.length, 1);
+    assert.match(failed[0]!, /POST \/v1\/releases failed: HTTP 401 invalid_key/);
+    assert.match(failed[0]!, /requestId req_auth/);
+    assert.equal(failed[0]!.includes(KEY), false);
+    assert.match(failed[0]!, /\[redacted\]/);
+    assert.ok(outputs.includes('release=main@abcdef0'));
+  });
+
+  it('fails a 501 from /v1/releases instead of skipping it', async () => {
+    const root = await workspace();
+    const { io, failed } = harness({
+      root,
+      fetch: async () =>
+        jsonResponse(501, {
+          title: 'Not implemented',
+          status: 501,
+          detail: 'releases are off',
+          code: 'not_implemented',
+        }),
+    });
+    await run(io);
+    assert.match(failed[0]!, /HTTP 501 not_implemented/);
+  });
+
+  it('refuses a pk key and a self cell before any request', async () => {
+    const root = await workspace();
+    const pk = harness({
+      root,
+      env: githubEnv({
+        TALARIA_RELEASE_KEY: buildApiKey({ class: 'pk', env: 'prod', cell: 'nz1' }),
+      }),
+    });
+    await run(pk.io);
+    assert.equal(pk.requests.length, 0);
+    assert.match(pk.failed[0]!, /Publishable keys/);
+
+    const selfHosted = harness({
+      root,
+      env: githubEnv({
+        TALARIA_RELEASE_KEY: buildApiKey({ class: 'sk', env: 'dev', cell: 'self' }),
+      }),
+    });
+    await run(selfHosted.io);
+    assert.equal(selfHosted.requests.length, 0);
+    assert.match(selfHosted.failed[0]!, /TALARIA_URL/);
+  });
+
+  it('does not post when the key or the release is missing', async () => {
+    const root = await workspace();
+    const missingKey = harness({
+      root,
+      env: { GITHUB_REF_NAME: 'main', GITHUB_SHA: SHA },
+    });
+    await run(missingKey.io);
+    assert.equal(missingKey.requests.length, 0);
+    assert.match(missingKey.failed[0]!, /TALARIA_RELEASE_KEY/);
+
+    const missingRelease = harness({
+      root,
+      env: { TALARIA_RELEASE_KEY: KEY },
+    });
+    await run(missingRelease.io);
+    assert.equal(missingRelease.requests.length, 0);
+    assert.equal(missingRelease.outputs.length, 0);
+  });
+
+  it('rejects a source-maps path outside the workspace and a non-https URL', async () => {
+    const root = await workspace();
+    const escaped = harness({
+      root,
+      inputs: { 'source-maps': '../outside' },
+    });
+    await run(escaped.io);
+    assert.equal(escaped.requests.length, 0);
+    assert.match(escaped.failed[0]!, /inside the workspace/);
+
+    const http = harness({
+      root,
+      inputs: { url: 'http://evil.example' },
+    });
+    await run(http.io);
+    assert.equal(http.requests.length, 0);
+    assert.match(http.failed[0]!, /https/);
+  });
+
+  it('rejects set-commits values other than auto', async () => {
+    const root = await workspace();
+    const { io, failed, requests } = harness({
+      root,
+      inputs: { 'set-commits': 'yes' },
+    });
+    await run(io);
+    assert.equal(requests.length, 0);
+    assert.match(failed[0]!, /set-commits must be 'auto'/);
   });
 });

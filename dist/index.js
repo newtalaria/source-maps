@@ -13046,7 +13046,7 @@ var require_fetch = __commonJS({
         this.emit("terminated", error2);
       }
     };
-    function fetch2(input, init = {}) {
+    function fetch(input, init = {}) {
       webidl.argumentLengthCheck(arguments, 1, { header: "globalThis.fetch" });
       const p = createDeferredPromise();
       let requestObject;
@@ -13976,7 +13976,7 @@ var require_fetch = __commonJS({
       }
     }
     module2.exports = {
-      fetch: fetch2,
+      fetch,
       Fetch,
       fetching,
       finalizeAndReportTiming
@@ -17232,7 +17232,7 @@ var require_undici = __commonJS({
     module2.exports.getGlobalDispatcher = getGlobalDispatcher;
     if (util.nodeMajor > 16 || util.nodeMajor === 16 && util.nodeMinor >= 8) {
       let fetchImpl = null;
-      module2.exports.fetch = async function fetch2(resource) {
+      module2.exports.fetch = async function fetch(resource) {
         if (!fetchImpl) {
           fetchImpl = require_fetch().fetch;
         }
@@ -19814,7 +19814,77 @@ var core = __toESM(require_core());
 // src/config.ts
 var import_node_path = __toESM(require("node:path"));
 
+// src/key.ts
+var API_KEY_PATTERN = /^tal_(pk|sk)_(prod|stg|test|dev)_([a-z][a-z0-9]*(?:-[a-z0-9]+)*)_([A-Za-z0-9]{43})([A-Za-z0-9]{6})$/;
+var MONITOR_TOKEN_PATTERN = /^tal_mon_([a-z][a-z0-9]*(?:-[a-z0-9]+)*)_([A-Za-z0-9]{43})([A-Za-z0-9]{6})$/;
+var REDACTION_PATTERN = /\btal_(?:(?:pk|sk)_(?:prod|stg|test|dev)|mon)_[a-z0-9-]{2,24}_[A-Za-z0-9]{49}\b/g;
+var BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+function crc32ieee(value) {
+  const bytes = Buffer.from(value, "utf8");
+  let crc = 4294967295;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      const mask = -(crc & 1);
+      crc = crc >>> 1 ^ 3988292384 & mask;
+    }
+  }
+  return (crc ^ 4294967295) >>> 0;
+}
+function encodeBase62(value) {
+  let n = value >>> 0;
+  if (n === 0) return "000000";
+  let out = "";
+  while (n > 0) {
+    out = BASE62[n % 62] + out;
+    n = Math.floor(n / 62);
+  }
+  return out.padStart(6, "0");
+}
+function keyChecksum(body) {
+  return encodeBase62(crc32ieee(body));
+}
+function scrubSecrets(line) {
+  return line.replace(REDACTION_PATTERN, "[redacted]");
+}
+function parseReleaseKey(raw) {
+  const key = raw.trim();
+  if (!key) {
+    throw new Error("Set TALARIA_RELEASE_KEY to a tal_sk_ key with releases:write.");
+  }
+  if (MONITOR_TOKEN_PATTERN.test(key)) {
+    throw new Error(
+      "TALARIA_RELEASE_KEY must be a tal_sk_ key. Monitor tokens cannot create releases."
+    );
+  }
+  const match = API_KEY_PATTERN.exec(key);
+  if (!match) {
+    throw new Error("TALARIA_RELEASE_KEY is not a valid tal_sk_ key.");
+  }
+  const klass = match[1];
+  const env = match[2];
+  const cell = match[3] ?? "";
+  if (cell.length < 2 || cell.length > 24) {
+    throw new Error("TALARIA_RELEASE_KEY is not a valid tal_sk_ key.");
+  }
+  if (klass === "pk") {
+    throw new Error(
+      "TALARIA_RELEASE_KEY must be a tal_sk_ key. Publishable keys cannot create releases."
+    );
+  }
+  if (klass !== "sk") {
+    throw new Error("TALARIA_RELEASE_KEY is not a valid tal_sk_ key.");
+  }
+  const body = key.slice(0, -6);
+  const checksum = key.slice(-6);
+  if (keyChecksum(body) !== checksum) {
+    throw new Error("TALARIA_RELEASE_KEY checksum is invalid.");
+  }
+  return { env, cell };
+}
+
 // src/release.ts
+var RELEASE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+@-]{0,199}$/;
 function resolveReleaseIdentity(input) {
   const env = input.env ?? {};
   const explicitRelease = nonEmpty(input.release) ?? nonEmpty(env.TALARIA_RELEASE) ?? nonEmpty(env.NEXT_PUBLIC_TALARIA_RELEASE);
@@ -19824,18 +19894,28 @@ function resolveReleaseIdentity(input) {
   }
   return { release: fromCi(env) };
 }
+function assertReleaseName(release) {
+  if (!RELEASE_NAME.test(release)) {
+    throw new Error(
+      `Release "${release}" does not match ${RELEASE_NAME}. The default ref replaces / with -.`
+    );
+  }
+}
 function fromCi(env) {
   const githubRef = nonEmpty(env.GITHUB_REF_NAME);
   const githubSha = nonEmpty(env.GITHUB_SHA);
   if (githubRef && githubSha && githubSha.length >= 7) {
-    return `${githubRef}@${githubSha.slice(0, 7)}`;
+    return `${sanitizeRef(githubRef)}@${githubSha.slice(0, 7)}`;
   }
   const gitlabRef = nonEmpty(env.CI_COMMIT_REF_NAME);
   const gitlabSha = nonEmpty(env.CI_COMMIT_SHA);
   if (gitlabRef && gitlabSha && gitlabSha.length >= 7) {
-    return `${gitlabRef}@${gitlabSha.slice(0, 7)}`;
+    return `${sanitizeRef(gitlabRef)}@${gitlabSha.slice(0, 7)}`;
   }
   return void 0;
+}
+function sanitizeRef(ref) {
+  return ref.replaceAll("/", "-");
 }
 function nonEmpty(value) {
   const trimmed = value?.trim();
@@ -19843,14 +19923,15 @@ function nonEmpty(value) {
 }
 
 // src/config.ts
-var DEFAULT_API_URL = "https://ingest.newtalaria.com";
-var KEY_IN_TEXT = /tal_live_[A-Za-z0-9_-]+/g;
-function scrubSecrets(line) {
-  return line.replace(KEY_IN_TEXT, "tal_live_[redacted]");
-}
-function resolveApiUrl(inputUrl, envUrl) {
-  const raw = inputUrl.trim() || envUrl?.trim() || DEFAULT_API_URL;
-  return raw.replace(/\/+$/, "");
+function resolveIngestUrl(input) {
+  const explicit = input.urlInput.trim() || input.envUrl?.trim() || "";
+  if (explicit) return explicit.replace(/\/+$/, "");
+  if (input.cell === "self") {
+    throw new Error(
+      "A self-hosted cell needs TALARIA_URL. The action cannot derive an ingest host for cell self."
+    );
+  }
+  return `https://ingest-${input.cell}.newtalaria.com`;
 }
 function assertSafeUrl(url) {
   let parsed;
@@ -19859,7 +19940,7 @@ function assertSafeUrl(url) {
   } catch {
     throw new Error("API URL is not a valid URL");
   }
-  if (parsed.username || parsed.password || /tal_live_/i.test(url)) {
+  if (parsed.username || parsed.password || /tal_(pk|sk|mon)_/i.test(url)) {
     throw new Error("API URL must not include credentials");
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
@@ -19871,13 +19952,13 @@ function assertSafeUrl(url) {
 function resolveMapDirectory(workspace, inputPath) {
   const requested = inputPath.trim();
   if (!requested) {
-    throw new Error("Set path to the directory of built source maps.");
+    throw new Error("Set source-maps to the directory of built source maps.");
   }
   const root = import_node_path.default.resolve(workspace);
   const resolved = import_node_path.default.resolve(root, requested);
   const relative = import_node_path.default.relative(root, resolved);
   if (relative === ".." || relative.startsWith(`..${import_node_path.default.sep}`) || import_node_path.default.isAbsolute(relative)) {
-    throw new Error("path must stay inside the workspace");
+    throw new Error("source-maps must stay inside the workspace");
   }
   return resolved;
 }
@@ -19891,362 +19972,185 @@ function resolveActionRelease(input) {
       "Could not resolve a Talaria release. Set release or TALARIA_RELEASE, or run on GitHub with GITHUB_REF_NAME and GITHUB_SHA."
     );
   }
-  if (release.length > 200) {
-    throw new Error("Release must be 200 characters or fewer");
-  }
+  assertReleaseName(release);
   return release;
+}
+var FULL_SHA = /^[0-9a-f]{40}$/i;
+function resolveCommitSha(env) {
+  const explicit = [
+    ["TALARIA_COMMIT_SHA", env.TALARIA_COMMIT_SHA],
+    ["NEXT_PUBLIC_TALARIA_COMMIT_SHA", env.NEXT_PUBLIC_TALARIA_COMMIT_SHA]
+  ];
+  for (const [name, value] of explicit) {
+    const trimmed = value?.trim() ?? "";
+    if (!trimmed) continue;
+    if (!FULL_SHA.test(trimmed)) {
+      throw new Error(`${name} must be a 40-character commit SHA.`);
+    }
+    return trimmed.toLowerCase();
+  }
+  for (const value of [env.GITHUB_SHA, env.CI_COMMIT_SHA]) {
+    const trimmed = value?.trim() ?? "";
+    if (FULL_SHA.test(trimmed)) return trimmed.toLowerCase();
+  }
+  return void 0;
 }
 
 // src/run.ts
 var import_promises2 = require("node:fs/promises");
 
-// node_modules/@newtalaria/cli/dist/upload.js
-var import_node_crypto = require("node:crypto");
-var import_promises = require("node:fs/promises");
-var import_node_path2 = __toESM(require("node:path"), 1);
-var import_node_zlib = require("node:zlib");
-
-// node_modules/@newtalaria/core/dist/transport/ingest_error.js
-var TransportError = class extends Error {
-  status;
-  className;
-  retry;
-  bodyMessage;
-  constructor(message, opts) {
-    super(message);
-    this.name = "TransportError";
-    this.status = opts.status;
-    this.className = opts.className ?? null;
-    this.retry = opts.retry ?? null;
-    this.bodyMessage = opts.bodyMessage ?? null;
+// src/commits.ts
+var import_node_child_process = require("node:child_process");
+var FULL_SHA2 = /^[0-9a-f]{40}$/i;
+var MAX_COMMITS = 250;
+function listCommitsWithGit(workspace, input) {
+  const limit = MAX_COMMITS;
+  const range = input.previousCommitSha && FULL_SHA2.test(input.previousCommitSha) ? `${input.previousCommitSha}..${input.commitSha}` : input.commitSha;
+  const format = "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e";
+  let out = git(workspace, ["log", `--max-count=${limit}`, format, range]);
+  if (out === void 0 && range !== input.commitSha) {
+    out = git(workspace, ["log", `--max-count=${limit}`, format, input.commitSha]);
   }
-};
-var IngestError = class _IngestError {
-  className;
-  message;
-  retry;
-  constructor(opts) {
-    this.className = opts?.className ?? null;
-    this.message = opts?.message ?? null;
-    this.retry = opts?.retry ?? null;
-  }
-  static parse(body) {
-    try {
-      const decoded = JSON.parse(body);
-      if (!decoded || typeof decoded !== "object") {
-        return new _IngestError();
-      }
-      const map = decoded;
-      const nested = map.data && typeof map.data === "object" ? map.data : {};
-      return new _IngestError({
-        className: stringOf(map.__className__ ?? map.className ?? map.exception ?? nested.__className__),
-        message: stringOf(map.message ?? nested.message),
-        retry: boolOf(map.retry ?? nested.retry)
-      });
-    } catch {
-      return new _IngestError();
-    }
-  }
-  static fromUnknown(error2) {
-    if (error2 instanceof TransportError) {
-      return new _IngestError({
-        className: error2.className,
-        message: error2.bodyMessage,
-        retry: error2.retry
-      });
-    }
-    return new _IngestError();
-  }
-  /**
-   * Permanent failures: dead API key, missing project, disallowed origin.
-   * Quota / rate-limit / 5xx are never permanent.
-   */
-  get isPermanent() {
-    if (this.retry === true)
-      return false;
-    if (this.retry === false)
-      return true;
-    const name = this.className ?? "";
-    if (name.includes("ApiUnauthorizedException"))
-      return true;
-    if (name.includes("ApiDisallowedDomainException"))
-      return true;
-    if (name.includes("ApiNotFoundException"))
-      return true;
-    if (name.includes("ApiConflictException") && (this.message ?? "").toLowerCase().includes("not active")) {
-      return true;
-    }
-    return false;
-  }
-  /** Missing a single scope — disable that signal only. */
-  get isScopeOnly() {
-    return (this.message ?? "").toLowerCase().includes("lacks required scope");
-  }
-  /**
-   * Dead API key / origin / missing project. Always disable every ingest
-   * signal. Other `retry: false` bodies (e.g. analytics disabled on the
-   * project) stay scoped to the failing path.
-   */
-  get isGlobalCredentialFailure() {
-    const name = this.className ?? "";
-    if (name.includes("ApiUnauthorizedException"))
-      return true;
-    if (name.includes("ApiDisallowedDomainException"))
-      return true;
-    if (name.includes("ApiNotFoundException"))
-      return true;
-    if (name.includes("ApiConflictException") && (this.message ?? "").toLowerCase().includes("not active")) {
-      return true;
-    }
-    return false;
-  }
-};
-function stringOf(value) {
-  if (typeof value !== "string")
-    return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
+  if (!out) return [];
+  return out.split("").map((row) => row.trim()).filter(Boolean).map((row) => {
+    const [id = "", authorName = "", authorEmail = "", timestamp = "", message = ""] = row.split("");
+    return { id, authorName, authorEmail, timestamp, message };
+  }).filter((commit) => FULL_SHA2.test(commit.id)).slice(0, MAX_COMMITS);
 }
-function boolOf(value) {
-  if (typeof value === "boolean")
-    return value;
-  if (typeof value === "string") {
-    switch (value.toLowerCase().trim()) {
-      case "true":
-      case "1":
-        return true;
-      case "false":
-      case "0":
-        return false;
-      default:
-        return null;
-    }
-  }
-  return null;
-}
-
-// node_modules/@newtalaria/core/dist/transport/serverpod.js
-var ServerpodTransport = class {
-  baseUrl;
-  apiKey;
-  constructor(options) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
-    this.apiKey = options.apiKey;
-  }
-  getBaseUrl() {
-    return this.baseUrl;
-  }
-  async call(endpoint, method, body, opts) {
-    const url = `${this.baseUrl}/${endpoint}/${method}`;
-    const headers = {
-      "Content-Type": "application/json; charset=utf-8",
-      "X-API-Key": this.apiKey
-    };
-    const init = {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      credentials: "omit"
-    };
-    if (opts?.keepalive) {
-      init.keepalive = true;
-    }
-    if (opts?.signal) {
-      init.signal = opts.signal;
-    }
-    const response = await fetch(url, init);
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const parsed = IngestError.parse(text);
-      let detail = text.slice(0, 400);
-      const className = parsed.className;
-      const message = parsed.message;
-      if (className || message) {
-        detail = [className, message].filter(Boolean).join(": ");
-      }
-      throw new TransportError(`Talaria ${endpoint}/${method} failed: HTTP ${response.status}${detail ? ` \u2014 ${detail}` : ""}`, {
-        status: response.status,
-        className: parsed.className,
-        retry: parsed.retry,
-        bodyMessage: parsed.message
-      });
-    }
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      return response.json();
-    }
+function git(cwd, args) {
+  try {
+    return (0, import_node_child_process.execFileSync)("git", args, {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    }).trim() || void 0;
+  } catch {
     return void 0;
   }
-};
-
-// node_modules/@newtalaria/core/dist/release.js
-function resolveReleaseIdentity2(input) {
-  const env = input.env ?? {};
-  const explicitRelease = nonEmpty2(input.release) ?? nonEmpty2(env.TALARIA_RELEASE) ?? nonEmpty2(env.NEXT_PUBLIC_TALARIA_RELEASE);
-  const explicitSha = nonEmpty2(input.commitSha) ?? nonEmpty2(env.TALARIA_COMMIT_SHA) ?? nonEmpty2(env.NEXT_PUBLIC_TALARIA_COMMIT_SHA);
-  const ci = fromCi2(env);
-  if (explicitRelease || explicitSha) {
-    return {
-      release: explicitRelease,
-      commitSha: explicitSha,
-      releaseRefKind: explicitRelease && ci.release && explicitRelease === ci.release ? ci.releaseRefKind : void 0
-    };
-  }
-  return ci;
-}
-function fromCi2(env) {
-  const githubRef = nonEmpty2(env.GITHUB_REF_NAME);
-  const githubSha = nonEmpty2(env.GITHUB_SHA);
-  if (githubRef && githubSha && githubSha.length >= 7) {
-    const type = nonEmpty2(env.GITHUB_REF_TYPE);
-    return {
-      release: `${githubRef}@${githubSha.slice(0, 7)}`,
-      commitSha: githubSha,
-      releaseRefKind: type === "tag" || type === "branch" ? type : void 0
-    };
-  }
-  const gitlabRef = nonEmpty2(env.CI_COMMIT_REF_NAME);
-  const gitlabSha = nonEmpty2(env.CI_COMMIT_SHA);
-  if (gitlabRef && gitlabSha && gitlabSha.length >= 7) {
-    return {
-      release: `${gitlabRef}@${gitlabSha.slice(0, 7)}`,
-      commitSha: gitlabSha,
-      releaseRefKind: nonEmpty2(env.CI_COMMIT_TAG) ? "tag" : "branch"
-    };
-  }
-  return {};
-}
-function nonEmpty2(value) {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : void 0;
 }
 
-// node_modules/@newtalaria/cli/dist/upload.js
+// src/problem.ts
+function asProblem(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const record = value;
+  const problem = {};
+  if (typeof record.title === "string") problem.title = record.title;
+  if (typeof record.status === "number") problem.status = record.status;
+  if (typeof record.detail === "string") problem.detail = record.detail;
+  if (typeof record.code === "string") problem.code = record.code;
+  if (typeof record.requestId === "string") problem.requestId = record.requestId;
+  if (typeof record.cell === "string") problem.cell = record.cell;
+  if (typeof record.url === "string") problem.url = record.url;
+  if (!problem.code && !problem.detail && !problem.title) return void 0;
+  return problem;
+}
+function describeProblem(result) {
+  let problem;
+  try {
+    problem = asProblem(JSON.parse(result.body));
+  } catch {
+    problem = void 0;
+  }
+  const status = problem?.status ?? result.status;
+  const code = problem?.code;
+  const detail = problem?.detail || problem?.title;
+  const requestId = problem?.requestId || result.requestId || "";
+  const parts = [`HTTP ${status}`];
+  if (code) parts.push(code);
+  const head = parts.join(" ");
+  const extra = [];
+  if (detail) extra.push(detail);
+  if (problem?.cell) extra.push(`cell ${problem.cell}`);
+  if (problem?.url) extra.push(problem.url);
+  if (requestId) extra.push(`requestId ${requestId}`);
+  if (!problem) {
+    const snippet = result.body.trim().replace(/\s+/g, " ").slice(0, 200);
+    if (snippet) extra.push(snippet);
+  }
+  return extra.length ? `${head}: ${extra.join("; ")}` : head;
+}
+
+// src/http.ts
+async function postJson(fetchImpl, input) {
+  let response;
+  try {
+    response = await fetchImpl(input.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.key}`,
+        Accept: "application/problem+json, application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(input.body)
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`POST ${pathOf(input.url)} failed: ${message}`);
+  }
+  const text = await response.text();
+  const result = {
+    status: response.status,
+    body: text,
+    requestId: response.headers.get("Request-Id")
+  };
+  if (response.ok) {
+    if (!text.trim()) return void 0;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return void 0;
+    }
+  }
+  throw new Error(`POST ${pathOf(input.url)} failed: ${describeProblem(result)}`);
+}
+function pathOf(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+// src/source-maps.ts
+var import_node_crypto = require("node:crypto");
+var import_promises = require("node:fs/promises");
+var import_node_path2 = __toESM(require("node:path"));
+var import_node_zlib = require("node:zlib");
 var SEGMENT = /^[A-Za-z0-9._~+-]+$/;
 var SAFE_DEBUG_ID = /^[A-Za-z0-9._~+-]{1,80}$/;
 var DEBUG_COMMENT = /\/\/# debugId=([^\s]+)/;
-var LOCAL_URL = "http://localhost:8080";
-async function uploadSourceMaps(options) {
-  const log = options.log ?? ((line) => console.log(line));
-  const error2 = options.error ?? ((line) => console.error(line));
-  let parsed;
-  try {
-    parsed = parseArgs(options.argv);
-  } catch (err) {
-    error2(err instanceof Error ? err.message : String(err));
-    return 1;
-  }
-  const url = parsed.url || options.env.TALARIA_BASE_URL || LOCAL_URL;
-  const release = resolveReleaseIdentity2({
-    release: parsed.release,
-    env: options.env
-  }).release || "local";
-  const apiKey = parsed.apiKey || options.env.TALARIA_RELEASE_KEY || options.env.TALARIA_API_KEY;
-  if (!apiKey) {
-    error2("Set TALARIA_RELEASE_KEY to a releases:write key, or pass --api-key.");
-    return 1;
-  }
-  const root = import_node_path2.default.resolve(options.cwd, parsed.path);
-  const maps = await collectMaps(root);
+async function prepareSourceMaps(input) {
+  const maps = await collectMaps(input.directory);
   if (maps.length === 0) {
-    error2(`No JavaScript source maps under ${root}`);
-    return 1;
+    throw new Error(`No JavaScript source maps under ${input.directory}`);
   }
-  log(`${url} release ${release}`);
-  if (parsed.silverstripeCombineFiles) {
-    log("Silverstripe combine: shifted generated lines by the header comment");
-  }
-  const transport = new ServerpodTransport({ baseUrl: url, apiKey });
-  let failed = 0;
+  const payloads = [];
   for (const file of maps) {
-    const prepared = await prepareArtifact(root, file);
-    const payload = parsed.silverstripeCombineFiles ? shiftForSilverstripeCombine(prepared.json) : prepared.json;
-    const fileName = prepared.fileName;
-    log(fileName);
-    if (!fileNameOk(fileName)) {
-      error2(`${fileName}: file name must be a served artifact path, such as static/js/main.js`);
-      failed += 1;
-      continue;
+    const prepared = await prepareArtifact(input.directory, file);
+    const json = input.silverstripeCombineFiles ? shiftForSilverstripeCombine(prepared.json) : prepared.json;
+    if (!fileNameOk(prepared.fileName)) {
+      throw new Error(
+        `${prepared.fileName}: file name must be a served artifact path, such as static/js/main.js`
+      );
     }
-    const raw = Buffer.from(payload, "utf8");
-    const debugId = prepared.debugId;
-    const gzipBytes = `decode('${(0, import_node_zlib.gzipSync)(raw).toString("base64")}', 'base64')`;
-    const input = {
-      __className__: "UploadSourceMapInput",
-      release,
-      fileName,
-      gzipBytes
+    const payload = {
+      release: input.release,
+      fileName: prepared.fileName,
+      gzipBytes: (0, import_node_zlib.gzipSync)(Buffer.from(json, "utf8")).toString("base64")
     };
-    if (debugId)
-      input.debugId = debugId;
-    try {
-      const result = await transport.call("sourceMaps", "upload", { input });
-      const id = result && typeof result === "object" && "id" in result ? String(result.id) : "";
-      log(id ? `${fileName} ${id}` : fileName);
-    } catch (err) {
-      failed += 1;
-      error2(`${fileName}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    if (prepared.debugId) payload.debugId = prepared.debugId;
+    payloads.push(payload);
   }
-  return failed === 0 ? 0 : 1;
-}
-function parseArgs(argv) {
-  const args = [...argv];
-  if (args[0] === "sourcemaps")
-    args.shift();
-  if (args[0] !== "upload") {
-    throw new Error("Usage: talaria sourcemaps upload [path]");
-  }
-  args.shift();
-  let release;
-  let url;
-  let apiKey;
-  let silverstripeCombineFiles = false;
-  const positionals = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg === "--release") {
-      release = requireValue(args, ++i, "--release");
-    } else if (arg === "--url") {
-      url = requireValue(args, ++i, "--url");
-    } else if (arg === "--api-key") {
-      apiKey = requireValue(args, ++i, "--api-key");
-    } else if (arg === "--silverstripe-combine-files") {
-      silverstripeCombineFiles = true;
-    } else if (arg.startsWith("--")) {
-      throw new Error(`Unknown flag ${arg}`);
-    } else {
-      positionals.push(arg);
-    }
-  }
-  if (positionals.length > 1) {
-    throw new Error("Pass one directory of built source maps");
-  }
-  return {
-    path: positionals[0] ?? ".",
-    release,
-    url,
-    apiKey,
-    silverstripeCombineFiles
-  };
+  return payloads;
 }
 function shiftForSilverstripeCombine(jsonText) {
   const parsed = parseMap(jsonText);
-  if (!parsed)
-    return jsonText;
+  if (!parsed) return jsonText;
   const mappings = parsed.mappings;
-  if (typeof mappings !== "string" || mappings.length === 0)
-    return jsonText;
+  if (typeof mappings !== "string" || mappings.length === 0) return jsonText;
   parsed.mappings = `;${mappings}`;
   return `${JSON.stringify(parsed)}
 `;
-}
-function requireValue(args, index, flag) {
-  const value = args[index];
-  if (!value || value.startsWith("--")) {
-    throw new Error(`${flag} needs a value`);
-  }
-  return value;
 }
 async function collectMaps(root) {
   const out = [];
@@ -20262,8 +20166,7 @@ async function walk(dir, out) {
     return;
   }
   for (const entry of entries) {
-    if (entry.name === "node_modules" || entry.name === ".git")
-      continue;
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
     const full = import_node_path2.default.join(dir, entry.name);
     if (entry.isDirectory()) {
       await walk(full, out);
@@ -20273,8 +20176,7 @@ async function walk(dir, out) {
   }
 }
 function fileNameOk(name) {
-  if (!name || name.length > 200 || name.includes("\\"))
-    return false;
+  if (!name || name.length > 200 || name.includes("\\")) return false;
   const parts = name.split("/");
   return parts.length > 0 && parts.every((part) => part !== "." && part !== ".." && SEGMENT.test(part));
 }
@@ -20321,25 +20223,20 @@ function debugIdSnippet(debugId) {
 function parseMap(jsonText) {
   try {
     const parsed = JSON.parse(jsonText);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return void 0;
-    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
     return parsed;
   } catch {
     return void 0;
   }
 }
 function safeDebugId(value) {
-  if (!value || !SAFE_DEBUG_ID.test(value))
-    return void 0;
+  if (!value || !SAFE_DEBUG_ID.test(value)) return void 0;
   return value;
 }
 function debugIdOf(parsed) {
-  if (!parsed)
-    return void 0;
+  if (!parsed) return void 0;
   const value = parsed.debugId ?? parsed.debug_id;
-  if (typeof value !== "string")
-    return void 0;
+  if (typeof value !== "string") return void 0;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : void 0;
 }
@@ -20353,55 +20250,132 @@ async function exists(file) {
 }
 
 // src/run.ts
+var FULL_SHA3 = /^[0-9a-f]{40}$/i;
 async function run(io) {
-  const upload = io.upload ?? uploadSourceMaps;
   const info2 = (line) => io.info(scrubSecrets(line));
-  const error2 = (line) => io.error(scrubSecrets(line));
+  const fetchImpl = io.fetch ?? globalThis.fetch;
   try {
     const key = io.env.TALARIA_RELEASE_KEY?.trim() ?? "";
-    if (!key) {
-      throw new Error("Set TALARIA_RELEASE_KEY to a releases:write key.");
-    }
-    io.setSecret(key);
+    if (key) io.setSecret(key);
+    const parsedKey = parseReleaseKey(key);
     const release = resolveActionRelease({
       release: io.getInput("release"),
       env: io.env
     });
-    const url = resolveApiUrl(io.getInput("url"), io.env.TALARIA_BASE_URL);
-    assertSafeUrl(url);
-    const directory = resolveMapDirectory(io.workspace, io.getInput("path"));
-    const infoStat = await (0, import_promises2.stat)(directory).catch(() => void 0);
-    if (!infoStat?.isDirectory()) {
-      throw new Error("path is not a directory of built source maps");
-    }
-    io.setOutput("release", release);
-    const env = { ...io.env, TALARIA_RELEASE_KEY: key };
-    delete env.TALARIA_API_KEY;
-    const argv = [
-      "sourcemaps",
-      "upload",
-      directory,
-      "--release",
-      release,
-      "--url",
-      url
-    ];
-    if (io.getInput("silverstripe-combine-files").trim().toLowerCase() === "true") {
-      argv.push("--silverstripe-combine-files");
-    }
-    const code = await upload({
-      cwd: io.workspace,
-      argv,
-      env,
-      log: info2,
-      error: error2
+    const url = resolveIngestUrl({
+      urlInput: io.getInput("url"),
+      envUrl: io.env.TALARIA_URL,
+      cell: parsedKey.cell
     });
-    if (code !== 0) {
-      throw new Error("Source map upload failed");
+    assertSafeUrl(url);
+    const sourceMapsInput = io.getInput("source-maps").trim();
+    const setCommits = io.getInput("set-commits").trim().toLowerCase();
+    const deploy = io.getInput("deploy").trim().toLowerCase() === "true";
+    if (setCommits && setCommits !== "auto" && setCommits !== "false") {
+      throw new Error("set-commits must be 'auto' when it is set.");
+    }
+    const commitsAuto = setCommits === "auto";
+    const commitSha = resolveCommitSha(io.env);
+    io.setOutput("release", release);
+    if (commitSha) io.setOutput("commit-sha", commitSha);
+    let payloads;
+    if (sourceMapsInput) {
+      const directory = resolveMapDirectory(io.workspace, sourceMapsInput);
+      const infoStat = await (0, import_promises2.stat)(directory).catch(() => void 0);
+      if (!infoStat?.isDirectory()) {
+        throw new Error("source-maps is not a directory of built source maps");
+      }
+      payloads = await prepareSourceMaps({
+        directory,
+        release,
+        silverstripeCombineFiles: io.getInput("silverstripe-combine-files").trim().toLowerCase() === "true"
+      });
+    }
+    info2(`release ${release} -> ${url}`);
+    await createRelease({
+      fetchImpl,
+      url,
+      key,
+      release,
+      commitSha,
+      commitsAuto,
+      listCommits: io.listCommits ?? ((input) => listCommitsWithGit(io.workspace, input)),
+      info: info2
+    });
+    if (payloads) {
+      for (const payload of payloads) {
+        info2(payload.fileName);
+        await postJson(fetchImpl, {
+          url: `${url}/v1/source-maps`,
+          key,
+          body: payload
+        });
+      }
+    }
+    if (deploy) {
+      info2("Deploy skipped: POST /v1/deploys returns 501 not_implemented.");
     }
   } catch (err) {
     io.setFailed(scrubSecrets(err instanceof Error ? err.message : String(err)));
   }
+}
+async function createRelease(input) {
+  const base = {
+    release: input.release,
+    ...input.commitSha ? { commitSha: input.commitSha } : {}
+  };
+  if (!input.commitsAuto) {
+    await postJson(input.fetchImpl, {
+      url: `${input.url}/v1/releases`,
+      key: input.key,
+      body: base
+    });
+    input.info("release created");
+    return;
+  }
+  if (!input.commitSha) {
+    throw new Error(
+      "set-commits: auto needs a 40-character commit SHA in GITHUB_SHA or TALARIA_COMMIT_SHA."
+    );
+  }
+  const head = input.listCommits({ commitSha: input.commitSha }).filter((commit) => commit.id.toLowerCase() === input.commitSha).slice(0, 1);
+  let response = await postJson(input.fetchImpl, {
+    url: `${input.url}/v1/releases`,
+    key: input.key,
+    body: head.length ? { ...base, commits: head } : base
+  });
+  const previous = previousSha(response);
+  let sent = head;
+  if (previous && previous !== input.commitSha) {
+    const range = input.listCommits({ commitSha: input.commitSha, previousCommitSha: previous }).slice(0, 250);
+    if (range.length) {
+      sent = range;
+      response = await postJson(input.fetchImpl, {
+        url: `${input.url}/v1/releases`,
+        key: input.key,
+        body: { ...base, commits: range }
+      });
+    }
+  }
+  if (sent.length === 0) {
+    throw new Error("set-commits: auto could not read commits from git.");
+  }
+  const count = commitCount(response) ?? sent.length;
+  input.info(
+    `release created with ${count} commit${count === 1 ? "" : "s"}${previous ? ` since ${previous.slice(0, 7)}` : ""}`
+  );
+}
+function previousSha(body) {
+  if (!body || typeof body !== "object") return void 0;
+  const record = body;
+  const value = record.previousReleaseCommitSha ?? record.previousCommitSha;
+  if (typeof value !== "string" || !FULL_SHA3.test(value.trim())) return void 0;
+  return value.trim().toLowerCase();
+}
+function commitCount(body) {
+  if (!body || typeof body !== "object") return void 0;
+  const value = body.commitCount;
+  return typeof value === "number" ? value : void 0;
 }
 
 // src/index.ts
@@ -20413,7 +20387,8 @@ void run({
   info: (message) => core.info(message),
   error: (message) => core.error(message),
   env: process.env,
-  workspace: process.env.GITHUB_WORKSPACE ?? process.cwd()
+  workspace: process.env.GITHUB_WORKSPACE ?? process.cwd(),
+  fetch: (input, init) => globalThis.fetch(input, init)
 }).catch((err) => {
   core.setFailed(scrubSecrets(err instanceof Error ? err.message : String(err)));
 });

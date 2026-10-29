@@ -2,7 +2,7 @@
   "name": "source-maps",
   "version": "1.0.0",
   "private": true,
-  "description": "GitHub Action that uploads built JavaScript source maps to Talaria",
+  "description": "GitHub Action that creates a Talaria release and uploads JavaScript source maps",
   "license": "MIT",
   "engines": {
     "node": ">=20"
@@ -13,8 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@newtalaria/cli": "^0.5.6"
+    "@actions/core": "^1.11.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

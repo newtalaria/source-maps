@@ -1,23 +1,39 @@
-name: Talaria source maps
-description: Upload built JavaScript source maps to Talaria for a release
+name: Talaria release
+description: Create a Talaria release, associate commits, and upload JavaScript source maps
 author: Talaria
 branding:
   icon: upload-cloud
   color: blue
 inputs:
-  path:
-    description: Directory of built *.js.map files, relative to the workspace
-    required: true
+  source-maps:
+    description: >-
+      Directory of built *.js.map files to upload, relative to the workspace.
+      When omitted, no source maps are uploaded.
+    required: false
+  set-commits:
+    description: >-
+      Set to auto to associate commits with the release. The action reads the
+      previous commit from POST /v1/releases and sends previous..HEAD. When
+      omitted, the release is created without a commit list.
+    required: false
+  deploy:
+    description: >-
+      Reserved. POST /v1/deploys returns 501 not_implemented, so the action
+      does not call it and records the deploy as skipped.
+    required: false
+    default: 'false'
   url:
     description: >-
-      Talaria API base URL. Defaults to https://ingest.newtalaria.com.
-      TALARIA_BASE_URL is used when this input is omitted.
+      Ingest base URL. When omitted, TALARIA_URL is used. When both are
+      omitted, the host is https://ingest-<cell>.newtalaria.com from the
+      release key. A self cell requires TALARIA_URL or this input.
     required: false
   release:
     description: >-
-      Release string sent with each map. Defaults to TALARIA_RELEASE, then
-      NEXT_PUBLIC_TALARIA_RELEASE, then GITHUB_REF_NAME@ the first 7 characters
-      of GITHUB_SHA.
+      Release name. Must match ^[A-Za-z0-9][A-Za-z0-9._+@-]{0,199}$.
+      Defaults to TALARIA_RELEASE, then NEXT_PUBLIC_TALARIA_RELEASE, then
+      GITHUB_REF_NAME@ the first 7 characters of GITHUB_SHA. The default
+      replaces / in the ref with -.
     required: false
   silverstripe-combine-files:
     description: >-
@@ -28,7 +44,9 @@ inputs:
     default: 'false'
 outputs:
   release:
-    description: Release string used for the upload
+    description: Release name sent to Talaria
+  commit-sha:
+    description: Full commit SHA for the release
 runs:
   using: node24
   main: dist/index.js

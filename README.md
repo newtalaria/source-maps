@@ -1,66 +1,87 @@
-# Talaria source maps
+# Talaria release
 
-Uploads a directory of already-built JavaScript source maps so Talaria can show original frames for that release.
+Creates a Talaria release from GitHub Actions, associates commits, and uploads JavaScript source maps.
 
-Run this after the step that emits `*.js.map` files. The action does not build the app. It calls `@newtalaria/cli` (`talaria sourcemaps upload`), which posts each map to `POST /sourceMaps/upload`.
+The action calls the ingest API directly:
 
-The release string matches the one the app sends. On GitHub Actions that string is `GITHUB_REF_NAME` plus `@` plus the first 7 characters of `GITHUB_SHA`, unless you set `release` or `TALARIA_RELEASE`. The same value is the `release` output.
+- `POST /v1/releases` with `Authorization: Bearer` and `TALARIA_RELEASE_KEY`
+- `POST /v1/source-maps` for each built `*.js.map`, when `source-maps` is set
+
+`TALARIA_RELEASE_KEY` must be a secret `tal_sk_<env>_<cell>_…` key with `releases:write`. Publishable `tal_pk_` keys and `tal_mon_` monitor tokens are refused before any request. The action checks the key grammar and CRC32 checksum locally.
+
+The ingest host is `https://ingest-<cell>.newtalaria.com`, taken from the key, unless `url` or `TALARIA_URL` is set. A `self` cell has no derived host and needs `TALARIA_URL`.
+
+`POST /v1/deploys` returns `501 not_implemented`. The `deploy` input does not call it. The step stays successful and logs that the deploy was skipped.
 
 ## Usage
 
 ```yaml
-- uses: newtalaria/source-maps@v1
-  id: maps
+- uses: newtalaria/release@v1
+  id: release
   with:
-    path: source-maps
+    source-maps: dist
+    set-commits: auto
   env:
     TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
 ```
 
-`TALARIA_RELEASE_KEY` is an API key with only `releases:write`. Put it in the environment. The action reads that variable and does not take the key as an input, so the value is not stored with the step inputs.
+Put the key in the environment. The action does not take it as an input.
 
-A later step can read the release that was uploaded:
-
-```yaml
-- run: echo "${{ steps.maps.outputs.release }}"
-```
-
-To share that string with the app build, set it before both steps:
+To use one release string in the app build and in Talaria, set it before both steps. The name must match `^[A-Za-z0-9][A-Za-z0-9._+@-]{0,199}$`. The action's own default replaces `/` in `GITHUB_REF_NAME` with `-`, so `feature/x` becomes `feature-x@<sha7>`.
 
 ```yaml
 - name: Release identity
   run: |
-    echo "TALARIA_RELEASE=${GITHUB_REF_NAME}@${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+    ref="${GITHUB_REF_NAME//\//-}"
+    echo "TALARIA_RELEASE=${ref}@${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
 - name: Build
   run: NEXT_PUBLIC_TALARIA_RELEASE="$TALARIA_RELEASE" npm run build
 
-- uses: newtalaria/source-maps@v1
+- uses: newtalaria/release@v1
   with:
-    path: dist
+    source-maps: dist
+    set-commits: auto
   env:
     TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
 ```
 
-`TALARIA_RELEASE` wins over the GitHub ref, so the maps and the events use one string.
+`set-commits: auto` posts the release, reads `previousReleaseCommitSha` from the response, then posts the `previous..HEAD` commits (at most 250). A checkout needs enough history to contain that commit.
+
+A later step can read the outputs:
+
+```yaml
+- run: echo "${{ steps.release.outputs.release }} ${{ steps.release.outputs.commit-sha }}"
+```
 
 ## Inputs
 
-| Name | Required | Default |
+| Name | Required | Description |
 | --- | --- | --- |
-| `path` | yes | Directory of built `*.js.map` files, relative to the workspace. |
-| `url` | no | `https://ingest.newtalaria.com`, or `TALARIA_BASE_URL` when that variable is set and `url` is omitted. |
-| `release` | no | `TALARIA_RELEASE`, then `NEXT_PUBLIC_TALARIA_RELEASE`, then `GITHUB_REF_NAME` @ the first 7 characters of `GITHUB_SHA`. |
-| `silverstripe-combine-files` | no | `true` when the uploaded script is the first file in `Requirements::combine_files`. The map's generated lines shift by Silverstripe's one-line header. Deploy the rewritten `.js` as that first file. |
+| `source-maps` | no | Directory of built `*.js.map` files, relative to the workspace. Omitted means no upload. |
+| `set-commits` | no | `auto` associates commits. Any other value except `false` fails the step. |
+| `deploy` | no | Accepted and skipped. The action does not call `POST /v1/deploys`. |
+| `url` | no | Ingest base URL. Overrides `TALARIA_URL` and cell derivation. |
+| `release` | no | Release name. Then `TALARIA_RELEASE`, `NEXT_PUBLIC_TALARIA_RELEASE`, then `<ref>@<sha7>` with `/` replaced by `-`. |
+| `silverstripe-combine-files` | no | `true` when the uploaded script is the first file in `Requirements::combine_files`. Generated lines shift by Silverstripe's one-line header. Deploy the rewritten `.js`. |
 
 `http://localhost` and `http://127.0.0.1` are accepted for a local API. Any other URL must be `https`.
 
-## Output
+Each map is posted as JSON: `release`, `fileName`, optional `debugId`, and `gzipBytes` (base64 of the gzipped map). When a sibling `.js` exists, the action writes one debug id into the `.js` and the map. Deploy those rewritten `.js` files.
+
+## Outputs
 
 | Name | Description |
 | --- | --- |
-| `release` | Release string sent with each map. Set before the upload starts. |
+| `release` | Release name sent to Talaria. |
+| `commit-sha` | Full 40-character commit SHA, when `GITHUB_SHA`, `CI_COMMIT_SHA`, or `TALARIA_COMMIT_SHA` provides one. |
+
+## Errors
+
+Failed API calls are read as `application/problem+json` (`type`, `title`, `status`, `detail`, `code`, `requestId`). The step message includes the status, `code`, `detail`, and `requestId`. A `wrong_cell` response also includes `cell` and `url`.
+
+The step fails when the key is missing, not a `tal_sk_` key, or has a bad checksum; the release name does not match the grammar; `source-maps` is not a directory inside the workspace; the URL is not allowed; or a release or source-map request fails. The action does not print the key.
 
 ## When the step fails
 
-The step fails, and does not upload, when the key is missing, the release cannot be resolved, `path` is not a directory inside the workspace, or the API URL is not allowed. It also fails when any file fails to upload. Maps that were stored before a later file failed stay stored. The action does not retry, and it does not print the API key.
+Maps already stored stay stored. The action does not retry.
