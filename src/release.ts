@@ -1,9 +1,10 @@
 /**
- * Same rules as `@newtalaria/core` `resolveReleaseIdentity`.
- * `@newtalaria/core@0.5.4` does not export that function, and the published
- * CLI reads `--release` or `TALARIA_RELEASE` only. This action resolves the
- * release and passes `--release`, so the CLI does not substitute `local`.
+ * Release identity for the action.
+ * The default CI string is `<ref>@<sha7>` with `/` in the ref replaced by `-`
+ * (naming-audit M11). An explicit release is not rewritten.
  */
+
+export const RELEASE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+@-]{0,199}$/;
 
 export interface ReleaseEnv {
   TALARIA_RELEASE?: string;
@@ -40,20 +41,32 @@ export function resolveReleaseIdentity(input: {
   return { release: fromCi(env) };
 }
 
+export function assertReleaseName(release: string): void {
+  if (!RELEASE_NAME.test(release)) {
+    throw new Error(
+      `Release "${release}" does not match ${RELEASE_NAME}. The default ref replaces / with -.`,
+    );
+  }
+}
+
 function fromCi(env: ReleaseEnv): string | undefined {
   const githubRef = nonEmpty(env.GITHUB_REF_NAME);
   const githubSha = nonEmpty(env.GITHUB_SHA);
   if (githubRef && githubSha && githubSha.length >= 7) {
-    return `${githubRef}@${githubSha.slice(0, 7)}`;
+    return `${sanitizeRef(githubRef)}@${githubSha.slice(0, 7)}`;
   }
 
   const gitlabRef = nonEmpty(env.CI_COMMIT_REF_NAME);
   const gitlabSha = nonEmpty(env.CI_COMMIT_SHA);
   if (gitlabRef && gitlabSha && gitlabSha.length >= 7) {
-    return `${gitlabRef}@${gitlabSha.slice(0, 7)}`;
+    return `${sanitizeRef(gitlabRef)}@${gitlabSha.slice(0, 7)}`;
   }
 
   return undefined;
+}
+
+function sanitizeRef(ref: string): string {
+  return ref.replaceAll('/', '-');
 }
 
 function nonEmpty(value: string | undefined): string | undefined {

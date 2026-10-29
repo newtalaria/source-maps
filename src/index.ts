@@ -11,6 +11,7 @@ void run({
   error: (message) => core.error(message),
   env: process.env,
   workspace: process.env.GITHUB_WORKSPACE ?? process.cwd(),
+  fetch: (input, init) => globalThis.fetch(input, init),
 }).catch((err: unknown) => {
   core.setFailed(scrubSecrets(err instanceof Error ? err.message : String(err)));
 });
